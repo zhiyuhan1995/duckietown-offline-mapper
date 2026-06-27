@@ -1,0 +1,74 @@
+input:
+  path: track.mp4
+  keyframe_interval: 120
+  max_keyframes: 12
+
+reconstruction:
+  backend: vggt_sfm
+  vggt:
+    model_id: facebook/VGGT-1B
+    checkpoint_url: null
+    device: cuda
+    dtype: auto
+    preprocess_mode: crop
+    use_point_map: false
+    confidence_threshold: 5.0
+    relax_ground_confidence: true
+    ground_confidence_threshold: 1.2
+    max_points: 250000
+    sample_stride: 2
+    seed: 7
+    save_depth: false
+  sfm:
+    save_colmap: true
+    bundle_adjustment: false
+    ba_max_query_points: 4096
+    ba_query_frame_num: 8
+    ba_vis_threshold: 0.2
+    ba_max_reproj_error: 8.0
+
+ground_plane:
+  distance_threshold: 0.025
+  max_iterations: 800
+
+alignment:
+  mode: sim2
+  control_points: []
+
+roi:
+  auto: true
+  percentile_low: 1.0
+  percentile_high: 99.0
+  padding: 0.15
+  x_min: 0.0
+  x_max: 5.0
+  y_min: -1.0
+  y_max: 1.0
+
+bev:
+  resolution: 0.02
+  unknown_rgb: [80, 80, 80]
+
+segmentation:
+  road_v_max: 95
+  road_s_max: 115
+  white_v_min: 150
+  white_s_max: 85
+  yellow_h_min: 15
+  yellow_h_max: 40
+  yellow_s_min: 60
+  yellow_v_min: 80
+  red_s_min: 70
+  red_v_min: 70
+  morphology_open: 1
+  morphology_close: 3
+
+occupancy:
+  non_ground_height_threshold: 0.06
+  robot_radius: 0.085
+  safety_margin: 0.025
+  unknown_as_occupied: false
+
+export:
+  output_dir: outputs/track_map
+  map_frame: map

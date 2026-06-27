@@ -1,0 +1,32 @@
+input:
+  path: track.mp4
+  keyframe_interval: 240
+  max_keyframes: 2
+
+reconstruction:
+  backend: vggt_sfm
+  vggt:
+    device: cuda
+    dtype: auto
+    preprocess_mode: pad
+    confidence_threshold: 5.0
+    max_points: 100000
+    sample_stride: 3
+    save_depth: false
+  sfm:
+    save_colmap: true
+    bundle_adjustment: true
+    ba_max_query_points: 512
+    ba_query_frame_num: 2
+    ba_vis_threshold: 0.2
+    ba_max_reproj_error: 8.0
+
+roi:
+  auto: true
+
+bev:
+  resolution: 0.02
+
+export:
+  output_dir: outputs/track_map_vggt_ba_smoke
+  map_frame: map
