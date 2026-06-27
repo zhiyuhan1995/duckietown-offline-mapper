@@ -404,3 +404,145 @@ Date: 2026-06-27
 - Documentation updated:
   - Rewrote `goal.md` for the two-stage VGGT bootstrap plus Level-2 3DGS BEV pipeline.
   - Filled `story.md` with the motivation for replacing point-cloud BEV with Gaussian-rendered continuous BEV texture.
+
+## GitHub Archive Update
+
+Date: 2026-06-27
+
+- User created GitHub repository: `zhiyuhan1995/duckietown-offline-mapper`.
+- Added GitHub remote:
+  - `github`: `git@github.com:zhiyuhan1995/duckietown-offline-mapper.git`
+- Pushed archived `main` branch to GitHub.
+- Latest archived commit after local environment ignore cleanup:
+  - `eb2402d ignore local virtual environments`
+- Mirrored the same `main` branch to the cluster bare remote:
+  - `origin`: `cluster-gpu03:/home/hanzhiyu/git/duckietown-offline-mapper.git`
+
+## 3DGS Smoke Troubleshooting Log
+
+Date: 2026-06-27
+
+### Issue: gsplat CUDA kernels were unavailable
+
+- Symptom:
+  - `simple_trainer.py` parsed the VGGT-COLMAP scene and initialized 40189 Gaussians, then failed on the first rasterization call.
+  - Error included: `gsplat: No CUDA toolkit found. gsplat will be disabled.`
+  - Follow-up exception: `AttributeError: 'NoneType' object has no attribute 'fully_fused_projection_fwd'`
+- Diagnosis route:
+  - Checked `nvcc`: not available on `cluster-gpu03`.
+  - Checked PyTorch CUDA:
+    - `.conda-vggt` has `torch 2.3.1+cu121`
+    - CUDA is available and both RTX 4090 GPUs are visible.
+  - Installed `nvidia-cuda-nvcc-cu12==12.1.105` into `.venv-gsplat`, but verified it only provided `ptxas` and CUDA headers, not an actual `nvcc` executable usable by PyTorch extension builds.
+  - Checked the official gsplat wheel index and found a matching prebuilt wheel for PyTorch 2.3 + CUDA 12.1.
+- Fix:
+  - Installed prebuilt gsplat wheel into `.venv-gsplat`:
+    - `gsplat-1.4.0+pt23cu121-cp310-cp310-linux_x86_64.whl`
+  - Left `.conda-vggt` intact for VGGT/pycolmap compatibility.
+  - Kept `.venv-gsplat` as the separate 3DGS environment, with `pycolmap.SceneManager` available for the gsplat examples.
+- Verification:
+  - `.venv-gsplat` imports `gsplat 1.4.0+pt23cu121` from the venv site-packages.
+  - `from gsplat.rendering import rasterization` succeeds.
+  - The smoke training run progressed past the first CUDA rasterization call and trained normally.
+- Residual note:
+  - The VGGT official docs recommend `gsplat==1.3.0`, but the local cluster lacks a usable CUDA toolkit for compiling 1.3.0 from source. The prebuilt 1.4.0 wheel is the practical smoke-test path for this host.
+
+### Issue: smoke run failed with `ZeroDivisionError`
+
+- Symptom:
+  - A short smoke run launched with `--steps_scaler 0.002` failed after the first few iterations.
+  - Error: `ZeroDivisionError: integer division or modulo by zero`.
+- Diagnosis route:
+  - Read `external/gsplat-v1.3.0/examples/simple_trainer.py`.
+  - `Config.adjust_steps()` multiplies `DefaultStrategy.refine_every` by `steps_scaler` and casts to `int`.
+  - Default `refine_every` is `100`; `int(100 * 0.002)` becomes `0`.
+  - `DefaultStrategy.step_post_backward()` later evaluates `step % self.refine_every`, causing the crash.
+- Fix:
+  - Stopped using tiny `steps_scaler` for smoke tests.
+  - Used explicit short training length while keeping strategy intervals positive:
+    - `--max_steps 120`
+    - `--save_steps 120`
+    - `--eval_steps 999999`
+  - Pushed `eval_steps` beyond the smoke run to avoid the example script's final trajectory-render path, which is not needed for checkpoint verification.
+- Verification:
+  - Command completed successfully on `cluster-gpu03` GPU 0.
+  - Output directory: `outputs/gsplat_smoke_result_success`
+  - Saved checkpoint: `outputs/gsplat_smoke_result_success/ckpts/ckpt_119_rank0.pt`
+  - Saved train stats: `outputs/gsplat_smoke_result_success/stats/train_step0119_rank0.json`
+  - Final reported stats:
+    - step: `119`
+    - GPU memory: `0.376 GiB`
+    - number of Gaussians: `40189`
+
+### Issue: gsplat scene needed manual `image_1` aliases
+
+- Symptom:
+  - The initial gsplat Parser test only worked after manually copying keyframes to names such as `images/image_1`, `images/image_2`, and `images/image_3`.
+  - VGGT-COLMAP export stored COLMAP image names as `image_1`, `image_2`, etc., while the actual saved keyframes were named `frame_0000_000000.png`, etc.
+  - Repeated reconstruction runs could also leave stale images in `work/vggt_images`, making gsplat's sorted image-name mapping unsafe.
+- Diagnosis route:
+  - Inspected `pycolmap.Reconstruction(...).images` for `outputs/track_map_vggt_colmap_smoke/work/colmap_sparse` and `outputs/track_map/work/colmap_sparse`.
+  - Confirmed the stored image names were `image_1`, `image_2`, etc.
+  - Confirmed `work/vggt_images` could contain more files than the current COLMAP sparse model after repeated runs.
+- Fix:
+  - `VGGT_SfMReconstructionBackend._write_vggt_images()` now resets the generated image directory before saving frames.
+  - COLMAP sparse image names are rewritten to the actual keyframe filenames before `reconstruction.write(...)`.
+  - Reconstruction export now creates `work/gsplat_scene/images` and `work/gsplat_scene/sparse` automatically for gsplat training.
+- Verification:
+  - Re-ran a 3-frame VGGT-COLMAP smoke on `cluster-gpu03`.
+  - COLMAP image names became:
+    - `frame_0000_000000.png`
+    - `frame_0001_000180.png`
+    - `frame_0002_000360.png`
+  - `work/gsplat_scene/images` contained exactly 3 images and `work/gsplat_scene/sparse` contained `cameras.bin`, `images.bin`, and `points3D.bin`.
+  - gsplat Parser loaded the generated scene directly; no manual alias files were needed.
+
+### Issue: Gaussian BEV initially was only a standalone preview
+
+- Symptom:
+  - The first Gaussian BEV render used checkpoint-normalized coordinates and auto bounds.
+  - That was useful for visualizing the splats, but it was not aligned to the mapper's occupancy-grid frame.
+  - Semantic segmentation could not safely consume that preview because its pixels did not share the mapper's `x/y/resolution` metadata.
+- Diagnosis route:
+  - Checked gsplat's orthographic projection implementation: `pixel = camera_xy * focal + center`.
+  - Reproduced the gsplat Parser normalization transform with `Parser(scene_dir, normalize=True).transform`.
+  - Derived the map-to-normalized transform as:
+    - `T_map_to_norm = T_colmap_raw_to_norm @ inverse(T_raw_to_map)`
+  - Verified that map x/y/forward basis vectors have equal normalized scale for this scene, so an orthographic camera can render directly into mapper grid coordinates.
+- Fix:
+  - Added `duckietown_offline_mapper/tools/render_gaussian_bev.py`.
+  - The script supports:
+    - standalone auto-bounds preview rendering
+    - map-aligned rendering using `scene_dir`, `raw_to_map_transform`, BEV bounds, resolution, width, height, and z bounds
+  - Added `duckietown_offline_mapper/src/gaussian.py` to run gsplat training and map-aligned BEV rendering in a separate `.venv-gsplat` subprocess.
+  - Updated `pipeline.py` so `gaussian.enabled: true` runs:
+    - gsplat training from `work/gsplat_scene`
+    - map-aligned Gaussian BEV rendering
+    - semantic segmentation using the Gaussian BEV when `gaussian.use_for_bev: true`
+  - Obstacle occupancy still comes from non-ground point-cloud projection.
+- Verification:
+  - Standalone Gaussian preview:
+    - Output: `outputs/gsplat_smoke_named_bev/gaussian_bev_rgb.png`
+    - Size: `1600 x 1423`
+    - Nonzero alpha pixels: `2241541`
+  - Map-aligned render smoke:
+    - Output: `outputs/gsplat_smoke_named_bev_map_aligned/gaussian_bev_rgb.png`
+    - Size: `74 x 74`
+    - Nonzero alpha pixels: `5298`
+  - Full pipeline smoke:
+    - Config: `duckietown_offline_mapper/configs/cluster_gpu03_gaussian_smoke.yaml`
+    - Host/GPU: `cluster-gpu03`, `CUDA_VISIBLE_DEVICES=0`
+    - Output: `outputs/track_map_gaussian_smoke`
+    - `bev_generation.source`: `gaussian_3dgs`
+    - Gaussian render mode: `map_aligned`
+    - Gaussian checkpoint: `outputs/track_map_gaussian_smoke/work/gaussian_splatting/ckpts/ckpt_119_rank0.pt`
+    - Gaussian BEV: `outputs/track_map_gaussian_smoke/work/gaussian_bev/gaussian_bev_rgb.png`
+    - Final stats:
+      - raw points: `53928`
+      - cropped points: `53856`
+      - free cells: `3623`
+      - occupied cells: `1853`
+      - unknown cells: `0`
+- Residual note:
+  - This is still a 3-frame / 120-step smoke test. It validates the Level-2 pipeline wiring, not final map quality.
+  - A production-quality Duckietown BEV should use more keyframes, more gsplat steps, and a tuned alpha/ROI policy so Gaussian opacity does not over-mark unknown space as observed.

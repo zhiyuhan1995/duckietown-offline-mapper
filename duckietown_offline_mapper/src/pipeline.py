@@ -8,6 +8,7 @@ import numpy as np
 from .alignment import estimate_sim2, sim2_to_sim3
 from .bev import metadata_from_bounds, rasterize_point_cloud
 from .export import export_all
+from .gaussian import run_gaussian_bev_stage
 from .io_utils import ensure_dir, load_yaml
 from .occupancy import fuse_occupancy, inflate_obstacles, obstacle_grid_from_non_ground
 from .plane import fit_ground_plane, ground_alignment_transform
@@ -97,6 +98,38 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     metadata = metadata_from_bounds(x_min, x_max, y_min, y_max, resolution, config.get("export", {}).get("map_frame", "map"))
     unknown_rgb = tuple(int(x) for x in bev_config.get("unknown_rgb", [80, 80, 80]))
     bev_rgb, point_counts = rasterize_point_cloud(cropped_cloud, metadata, unknown_rgb=unknown_rgb)
+    bev_source = "point_cloud_raster"
+
+    gaussian_metadata: dict[str, Any] = {"enabled": False}
+    gaussian_config = dict(config.get("gaussian", {}))
+    if bool(gaussian_config.get("enabled", False)):
+        scene_dir = reconstruction.metadata.get("colmap", {}).get("gsplat_scene_dir")
+        if not scene_dir:
+            raise RuntimeError(
+                "Gaussian BEV is enabled, but reconstruction did not export a gsplat scene. "
+                "Set reconstruction.sfm.save_colmap: true."
+            )
+        raw_to_map_transform = alignment_transform @ ground_transform
+        z_low, z_high = np.percentile(cropped_cloud.points[:, 2], [0.5, 99.5])
+        gaussian_metadata = run_gaussian_bev_stage(
+            gaussian_config,
+            scene_dir,
+            output_dir / "work",
+            raw_to_map_transform,
+            metadata,
+            (float(z_low), float(z_high)),
+        )
+        if bool(gaussian_config.get("use_for_bev", True)):
+            gaussian_rgb = _read_rgb_image(Path(gaussian_metadata["rgb_path"]))
+            if gaussian_rgb.shape[:2] != bev_rgb.shape[:2]:
+                raise RuntimeError(
+                    "Gaussian BEV size does not match mapper BEV metadata: "
+                    f"{gaussian_rgb.shape[:2]} vs {bev_rgb.shape[:2]}"
+                )
+            bev_rgb = gaussian_rgb
+            alpha = _read_gray_image(Path(gaussian_metadata["alpha_path"]))
+            point_counts = (alpha > int(gaussian_config.get("alpha_observed_threshold", 5))).astype(np.int32)
+            bev_source = "gaussian_3dgs"
 
     segmentation_config = dict(config.get("segmentation", {}))
     segmentation_config["unknown_rgb"] = list(unknown_rgb)
@@ -126,9 +159,11 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         "obstacle_inflation_radius": inflation_radius,
         "semantic_classes": {cls.name: int(cls.value) for cls in SemanticClass},
         "bev_generation": {
+            "source": bev_source,
             "unknown_rgb": list(unknown_rgb),
             "observed_cell_count": int(np.count_nonzero(point_counts)),
         },
+        "gaussian": gaussian_metadata,
         "ground_plane": {
             "coefficients": plane_fit.coefficients.tolist(),
             "ground_count": plane_fit.ground_count,
@@ -147,6 +182,10 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         metadata,
         project_metadata,
     )
+    if gaussian_metadata.get("enabled"):
+        paths["gaussian_bev_rgb"] = Path(gaussian_metadata["rgb_path"])
+        paths["gaussian_bev_alpha"] = Path(gaussian_metadata["alpha_path"])
+        paths["gaussian_bev_expected_depth"] = Path(gaussian_metadata["depth_path"])
     return {
         "paths": {k: str(v) for k, v in paths.items()},
         "metadata": metadata.to_dict(),
@@ -159,3 +198,27 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
         },
     }
+
+
+def _read_rgb_image(path: Path) -> np.ndarray:
+    cv2 = _require_cv2()
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Could not read RGB image: {path}")
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def _read_gray_image(path: Path) -> np.ndarray:
+    cv2 = _require_cv2()
+    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise RuntimeError(f"Could not read grayscale image: {path}")
+    return image
+
+
+def _require_cv2():
+    try:
+        import cv2  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("opencv-python is required to read Gaussian BEV outputs.") from exc
+    return cv2

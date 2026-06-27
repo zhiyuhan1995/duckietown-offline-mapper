@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 from typing import Any
 
 import numpy as np
@@ -164,7 +165,7 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
     @staticmethod
     def _write_vggt_images(frames: list[Keyframe], output_dir: Path) -> list[Path]:
         cv2 = _require_cv2()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        _reset_generated_dir(output_dir)
         paths: list[Path] = []
         for i, frame in enumerate(frames):
             path = output_dir / f"frame_{i:04d}_{frame.index:06d}.png"
@@ -333,13 +334,16 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
             shared_camera=False,
             camera_type="PINHOLE",
         )
+        self._assign_colmap_image_names(reconstruction, image_paths)
         sparse_dir = output_dir / "colmap_sparse"
-        sparse_dir.mkdir(parents=True, exist_ok=True)
+        _reset_generated_dir(sparse_dir)
         reconstruction.write(str(sparse_dir))
+        gsplat_scene_dir = self._prepare_gsplat_scene(output_dir, sparse_dir, image_paths)
         return {
             "mode": "direct_vggt_depth",
             "bundle_adjustment": False,
             "sparse_dir": str(sparse_dir),
+            "gsplat_scene_dir": str(gsplat_scene_dir),
             "image_names": [p.name for p in image_paths],
         }
 
@@ -390,17 +394,45 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
         )
         if reconstruction is None:
             raise RuntimeError("VGGT-SfM bundle adjustment could not build a reconstruction")
+        self._assign_colmap_image_names(reconstruction, image_paths)
         pycolmap.bundle_adjustment(reconstruction, pycolmap.BundleAdjustmentOptions())
         sparse_dir = output_dir / "colmap_sparse_ba"
-        sparse_dir.mkdir(parents=True, exist_ok=True)
+        _reset_generated_dir(sparse_dir)
         reconstruction.write(str(sparse_dir))
+        gsplat_scene_dir = self._prepare_gsplat_scene(output_dir, sparse_dir, image_paths)
         return {
             "mode": "tracked_bundle_adjustment",
             "bundle_adjustment": True,
             "sparse_dir": str(sparse_dir),
+            "gsplat_scene_dir": str(gsplat_scene_dir),
             "valid_track_count": int(np.count_nonzero(valid_track_mask)),
             "image_names": [p.name for p in image_paths],
         }
+
+    @staticmethod
+    def _assign_colmap_image_names(reconstruction: Any, image_paths: list[Path]) -> None:
+        image_ids = sorted(reconstruction.images)
+        if len(image_ids) != len(image_paths):
+            raise RuntimeError(
+                "VGGT COLMAP export produced a different image count than the extracted keyframes: "
+                f"{len(image_ids)} sparse images vs {len(image_paths)} keyframes."
+            )
+        for image_id, image_path in zip(image_ids, image_paths, strict=True):
+            reconstruction.images[image_id].name = image_path.name
+
+    @staticmethod
+    def _prepare_gsplat_scene(output_dir: Path, sparse_dir: Path, image_paths: list[Path]) -> Path:
+        scene_dir = output_dir / "gsplat_scene"
+        images_dir = scene_dir / "images"
+        scene_sparse_dir = scene_dir / "sparse"
+        _reset_generated_dir(images_dir)
+        _reset_generated_dir(scene_sparse_dir)
+        for image_path in image_paths:
+            shutil.copy2(image_path, images_dir / image_path.name)
+        for sparse_file in sorted(sparse_dir.iterdir()):
+            if sparse_file.is_file():
+                shutil.copy2(sparse_file, scene_sparse_dir / sparse_file.name)
+        return scene_dir
 
 
 def backend_from_config(config: dict[str, Any]) -> ReconstructionBackend:
@@ -487,6 +519,12 @@ def _cleanup_cuda(torch: Any, device: str) -> None:
             torch.cuda.ipc_collect()
         except Exception:
             pass
+
+
+def _reset_generated_dir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
 
 
 def _resized_image_colors(images: Any, size_hw: tuple[int, int], torch: Any) -> np.ndarray:
