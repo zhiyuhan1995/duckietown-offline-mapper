@@ -91,7 +91,8 @@ def _auto_bounds(points_map: np.ndarray, args: argparse.Namespace) -> tuple[floa
 
 
 def render(args: argparse.Namespace) -> dict[str, object]:
-    scene_dir, raw_to_map = _load_run_summary(Path(args.run_summary))
+    summary_scene_dir, raw_to_map = _load_run_summary(Path(args.run_summary))
+    scene_dir = str(args.scene_dir or summary_scene_dir)
     raw_to_norm = _load_colmap_normalization(scene_dir)
     norm_to_map = raw_to_map @ np.linalg.inv(raw_to_norm)
 
@@ -160,6 +161,7 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         "checkpoint": str(args.checkpoint),
         "run_summary": str(args.run_summary),
         "scene_dir": scene_dir,
+        "summary_scene_dir": summary_scene_dir,
         "source_gaussians": int(len(means)),
         "selected_gaussians": int(np.count_nonzero(mask)),
         "rasterized_gaussians": int(len(u)),
@@ -185,6 +187,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--run-summary", required=True)
+    parser.add_argument(
+        "--scene-dir",
+        default=None,
+        help="Optional gsplat scene override. Use this when a dense training scene is already aligned to the run-summary raw frame.",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--width", type=int, default=2400)
     parser.add_argument("--height", type=int, default=0)

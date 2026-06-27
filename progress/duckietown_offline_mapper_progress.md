@@ -691,3 +691,61 @@ Date: 2026-06-27
   - Semantic segmentation and occupancy export use the point-cloud BEV raster.
   - Gaussian renders are debug / QA artifacts only.
   - A future promotion to pipeline input requires realistic source-camera renders and a stable, planner-readable BEV texture.
+
+## 3DGS 508-Frame Formal Training QA
+
+Date: 2026-06-27
+
+- Training setup:
+  - Dense scene: `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene`
+  - Source frames: every 3rd frame from `track.mp4`, `508` images total.
+  - Camera prep: dense COLMAP/SfM scene aligned back to the VGGT seed coordinate frame.
+  - Host/GPU: `cluster-gpu02`, physical GPU 2, because `cluster-gpu01` has Blackwell compatibility issues with the current gsplat wheel and `cluster-gpu03` was unstable / occupied.
+- Completed runs:
+  - 7k checkpoint dir: `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/gaussian_training_every3_7k_gpu02_v1/ckpts`
+  - 30k checkpoint dir: `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/gaussian_training_every3_30k_gpu02_v1/ckpts`
+  - Final 30k checkpoint: `ckpt_29999_rank0.pt`
+  - Final 30k Gaussian count: `745855`
+  - Final 30k reported memory in trainer log: about `1.48 GiB`
+- Camera-view QA:
+  - 7k subset contact sheet: `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/camera_view_renders_every3_7k_gpu02_subset/camera_view_contact_sheet.png`
+  - 7k subset mean PSNR: `21.40 dB`
+  - 30k subset contact sheet: `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/camera_view_renders_every3_30k_gpu02_subset/camera_view_contact_sheet.png`
+  - 30k subset mean PSNR: `23.61 dB`
+  - Result: 30k improved over 7k, but camera renders are still smoothed / gray and visibly imperfect.
+- BEV QA:
+  - Direct orthographic Gaussian BEV: `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/gaussian_bev_every3_30k_gpu02_map_w2400_sh0/gaussian_bev_rgb.png`
+  - Ground-plane center-splat BEV: `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/gaussian_plane_bev_every3_30k_gpu02_z006_sigma3_w2400/gaussian_plane_bev_rgb.png`
+  - Result: direct orthographic BEV is still a blurred shiny smear; plane projection is more stable but still sparse / point-like and missing continuous topology.
+- Conclusion:
+  - More frames plus a formal 30k standard 3DGS run did not produce a planner-grade BEV texture.
+  - This result must remain standalone QA only and must not be connected back into semantic segmentation / occupancy generation.
+  - Next viable route is a BEV-specific method: ground-plane-constrained Gaussian / 2D texture optimization with multi-view supervision, not plain perspective-trained 3DGS rendered from an extreme overhead view.
+
+### Issue: interactive rendering access for the trained 30k Gaussian result
+
+- Symptom:
+  - Static exported PNGs were not enough to inspect whether the 3DGS result itself is salvageable.
+  - The user requested a real-time, mouse-interactive rendering UI.
+- Diagnosis route:
+  - Confirmed the latest usable checkpoint exists:
+    - `outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/gaussian_training_every3_30k_gpu02_v1/ckpts/ckpt_29999_rank0.pt`
+  - Confirmed `cluster-gpu03` GPU 0 was occupied by another user's process:
+    - user: `fischerp`
+    - command: `radfoam/train.py`
+    - memory: about `22.7 GiB`
+  - Confirmed `cluster-gpu02` GPU 2 was available and compatible with `.venv-gsplat`.
+- Fix route:
+  - Started gsplat's `simple_viewer.py` on `cluster-gpu02` GPU 2.
+  - Remote listener:
+    - host: `cluster-gpu02`
+    - port: `8097`
+    - process: `.venv-gsplat/bin/python external/gsplat-v1.3.0/examples/simple_viewer.py`
+    - checkpoint: `ckpt_29999_rank0.pt`
+    - observed viewer GPU memory: about `930 MiB`
+  - Added local SSH port forwarding:
+    - local URL: `http://127.0.0.1:8097`
+    - forward: `8097 -> cluster-gpu02:8097`
+- Verification:
+  - Local HTTP probe returned status `200` for `http://127.0.0.1:8097`.
+  - Remote `viser` log reports both HTTP and websocket endpoints on port `8097`.
