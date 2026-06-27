@@ -6,6 +6,11 @@ Create an offline mapping pipeline for Duckietown. The system takes either a mon
 Core requirement:
 The reconstruction path must use VGGT-SfM only. There should be no IPM or dummy reconstruction fallback in the final pipeline.
 
+Current 3DGS quality-gate amendment:
+- 3D Gaussian Splatting is required as a Level-2 BEV texture QA experiment after VGGT-SfM, but it is not approved as a semantic or occupancy input yet.
+- The production mapper must keep using the VGGT point-cloud BEV raster for semantic segmentation and occupancy export until Gaussian camera-view renders and BEV renders are visually realistic and stable.
+- Gaussian training, camera-view render checks, BEV render checks, logs, and troubleshooting must remain inspectable from the UI and local progress records.
+
 Updated high-level pipeline:
 1. Load input video or images.
 2. Extract keyframes if the input is a video.
@@ -19,49 +24,51 @@ Updated high-level pipeline:
    - fit a coarse dominant ground plane from the VGGT point cloud with RANSAC
    - rotate the reconstruction so the coarse ground plane lies at z=0
    - use this bootstrap plane only to define a stable top-down coordinate system
-5. Run Level-2 3D Gaussian Splatting:
+5. Prepare the standalone Level-2 3D Gaussian Splatting QA stage:
    - initialize training from VGGT-COLMAP cameras and points
-   - train/optimize a 3D Gaussian scene representation from the selected keyframes
+   - train/optimize a 3D Gaussian scene representation from selected / dense training frames
    - keep training and rendering isolated from the Streamlit service process
-   - run GPU work on a remote GPU host, currently cluster-gpu03
-6. Render Gaussian-derived BEV products:
+   - run GPU work on an explicitly selected remote GPU host only after the host is reachable and healthy
+6. Render Gaussian-derived QA products:
+   - original camera-view comparisons / PSNR contact sheets
    - orthographic top-down BEV RGB texture
    - alpha / coverage map
    - optional depth, height, and normal maps
    - optional debug trajectory and Gaussian point visualization
-7. Use the Gaussian-rendered BEV texture, alpha, and height products as the preferred downstream map representation.
+7. Keep Gaussian products out of semantic segmentation and occupancy export until the quality gate is explicitly passed.
 8. Refine / confirm the ground plane and metric alignment:
    - source control points are selected on the BEV plane
    - selected source z is always 0
    - target points are manually entered in real-world map-frame xy coordinates
    - estimate Sim(2) by default, with optional SE(2)
-9. Crop the scene to the Duckietown track region using the aligned Gaussian BEV products.
-10. Run BEV semantic segmentation on the Gaussian-rendered texture:
+9. Crop the scene to the Duckietown track region using the aligned BEV metadata/products.
+10. Run BEV semantic segmentation on the point-cloud BEV raster:
     - drivable road
     - non-drivable island / outside-track area
     - lane markings
     - stop lines
     - unknown
 11. Generate a geometric obstacle occupancy layer:
-    - use non-ground geometry and/or Gaussian-rendered height/depth products
+    - use non-ground VGGT/SfM geometry for the first integrated version
+    - keep Gaussian-rendered height/depth products available for inspection only, not for current obstacle fusion
     - project obstacles above a configurable height threshold into BEV
 12. Fuse semantic non-drivable regions and geometric obstacle regions into a final occupancy map.
 13. Inflate blocked cells according to the Duckiebot radius and safety margin.
 14. Export ROS-compatible map products and project metadata.
 
-Gaussian Splatting requirements:
+Gaussian Splatting QA requirements:
 - Follow the official VGGT recommendation:
   - export VGGT predictions to COLMAP format
   - train Gaussian Splatting from the generated `images/` and `sparse/` scene directory
 - Use `gsplat` as the first target implementation.
-- The first integration can be a standalone experiment script before it is wired into the full pipeline.
+- The implementation must support standalone inspection only until render quality is accepted.
 - Intermediate rendered products must be saved for inspection:
   - `gaussian_bev_rgb.png`
   - `gaussian_bev_alpha.png`
   - `gaussian_bev_height.png` or `gaussian_bev_depth.png` when available
   - trainer logs / metrics
   - a preview image visible from the Streamlit app
-- The raw point-cloud BEV raster should remain available only as a debug comparison, not as the main semantic input once Gaussian BEV is enabled.
+- The raw point-cloud BEV raster remains the semantic input. Gaussian BEV is a QA artifact until explicitly promoted after visual validation.
 
 Interface:
 Create a Streamlit UI with the following tabs:
@@ -71,21 +78,21 @@ Create a Streamlit UI with the following tabs:
    - preview keyframes
 2. Reconstruction:
    - run VGGT-SfM reconstruction
-   - load existing point clouds and Gaussian products
+   - load existing point clouds and standalone Gaussian QA products
    - preview point cloud statistics
    - inspect the reconstructed point cloud with an interactive mouse-rotatable 3D viewer
 3. Ground Plane:
    - run bootstrap RANSAC ground-plane fitting
    - sliders for distance threshold and max iterations
    - preview ground vs non-ground point counts
-4. Gaussian Splatting:
+4. 3DGS QA:
    - prepare VGGT-COLMAP scene data
-   - launch / monitor 3DGS training on the remote GPU host
+   - inspect remote 3DGS training/render artifacts and logs
    - render top-down orthographic BEV texture products
    - preview Gaussian-rendered BEV RGB / alpha / height
 5. Planar Metric Alignment / Map Frame Definition:
-   - show the Gaussian-rendered BEV texture when available
-   - fall back to point-cloud BEV only for debug
+   - show a clickable point-cloud BEV generated from the ground-aligned point cloud
+   - Gaussian BEV may be used only as a visual reference once it has been rendered for the current map
    - allow the user to click points directly on the 2D BEV plane
    - convert each click to source point `(x_recon, y_recon, z_recon=0)`
    - ask the user to manually enter the corresponding map-frame coordinate `(x_map, y_map, z_map=0)`
@@ -97,10 +104,9 @@ Create a Streamlit UI with the following tabs:
    - optionally allow polygon ROI
 7. BEV:
    - set BEV resolution in meters per pixel
-   - choose Gaussian BEV or raw point raster debug source
-   - preview RGB / alpha / height layers
+   - preview the point-cloud BEV RGB used by segmentation
 8. Semantic Segmentation:
-   - primary input is the Gaussian-rendered BEV RGB texture
+   - primary input is the point-cloud BEV RGB texture
    - the current HSV/RGB threshold segmentation is acceptable as a first semantic backend
    - the design must allow replacing color thresholds with a learned BEV semantic segmentation model
 9. Occupancy:
@@ -114,7 +120,7 @@ Implementation requirements:
 - Use Python 3.10+.
 - Use numpy, opencv-python, open3d, scipy, scikit-image, pyyaml, streamlit.
 - Use PyTorch and VGGT for reconstruction.
-- Use gsplat for the Level-2 Gaussian Splatting experiment/integration.
+- Use gsplat for the Level-2 Gaussian Splatting QA experiment.
 - Keep reconstruction, Gaussian optimization, BEV rendering, semantic segmentation, occupancy, and export as modular components.
 - Do not run heavy GPU work inside the Streamlit service process.
 - Use subprocesses or CLI entry points for VGGT and 3DGS jobs.
@@ -129,7 +135,7 @@ Implementation requirements:
   - Sim(2) / Sim(3) alignment utilities
   - world/grid coordinate conversion
   - occupancy fusion logic
-  - Gaussian BEV metadata and click-to-world conversion when added
+  - BEV click-to-world conversion
 - Make the code modular and readable. Do not put everything in one script.
 
 Suggested file structure:
@@ -140,7 +146,6 @@ duckietown_offline_mapper/
   README.md
   configs/
     default.yaml
-    gaussian_3dgs_smoke.yaml
   src/
     io_utils.py
     keyframes.py
@@ -148,22 +153,24 @@ duckietown_offline_mapper/
     pointcloud.py
     plane.py
     alignment.py
-    gaussian.py
-    gaussian_bev.py
+    alignment_bev.py
     bev.py
     segmentation.py
     occupancy.py
     export.py
     visualization.py
   tools/
-    prepare_gsplat_scene.py
-    train_gsplat_scene.py
+    prepare_every3_gaussian_scene.py
+    align_colmap_scene_to_vggt.py
+    render_gsplat_camera_views.py
+    render_gaussian_plane_bev.py
     render_gaussian_bev.py
+    patch_gsplat_no_holdout.py
   tests/
     test_alignment.py
     test_grid_coordinates.py
     test_occupancy.py
-    test_gaussian_bev.py
+    test_alignment_bev.py
 ```
 
 Final output requirement:
@@ -208,7 +215,7 @@ free_thresh: 0.196
    - grid_to_world convention
    - reconstruction_to_map transform
    - bootstrap ground plane
-   - Gaussian Splatting training/render metadata
+   - Gaussian Splatting metadata when available
    - robot radius
    - safety margin
    - obstacle inflation radius
@@ -216,7 +223,7 @@ free_thresh: 0.196
    - BEV generation parameters
    - alignment control points and residual error
 
-5. Gaussian BEV debug products:
+5. Standalone Gaussian BEV QA products when available:
    - `gaussian_bev_rgb.png`
    - `gaussian_bev_alpha.png`
    - `gaussian_bev_height.png` or `gaussian_bev_depth.png` when available

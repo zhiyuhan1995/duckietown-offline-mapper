@@ -49,26 +49,6 @@ bev:
   resolution: 0.02
   unknown_rgb: [80, 80, 80]
 
-gaussian:
-  enabled: false
-  use_for_bev: true
-  python: .venv-gsplat/bin/python
-  trainer_script: external/gsplat-v1.3.0/examples/simple_trainer.py
-  examples_dir: external/gsplat-v1.3.0/examples
-  render_script: duckietown_offline_mapper/tools/render_gaussian_bev.py
-  cuda_visible_devices: 0
-  render_device: cuda:0
-  data_factor: 1
-  max_steps: 120
-  save_steps: 120
-  eval_steps: 999999
-  tb_every: 20
-  render_sh_degree: 0
-  alpha_observed_threshold: 5
-  background: [0.32, 0.32, 0.32]
-  trainer_extra_args: []
-  render_extra_args: []
-
 segmentation:
   road_v_max: 95
   road_s_max: 115

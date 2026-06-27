@@ -546,3 +546,148 @@ Date: 2026-06-27
 - Residual note:
   - This is still a 3-frame / 120-step smoke test. It validates the Level-2 pipeline wiring, not final map quality.
   - A production-quality Duckietown BEV should use more keyframes, more gsplat steps, and a tuned alpha/ROI policy so Gaussian opacity does not over-mark unknown space as observed.
+
+## 3DGS Quality Gate Retraction
+
+### Issue: Gaussian BEV was connected before render quality was acceptable
+
+- Symptom:
+  - The user reviewed the Gaussian BEV render and correctly flagged that it was not realistic or continuous enough to feed into the mapping pipeline.
+  - The rendered BEV still had smoke-test artifacts: blurred texture, incomplete road edges, irregular coverage, and poor suitability for downstream semantic segmentation.
+  - The app and README still exposed controls that made the Gaussian BEV look like an accepted pipeline input.
+- Diagnosis route:
+  - Compared the current render quality against the intended goal: a continuous top-down Duckietown texture suitable for semantic segmentation.
+  - Confirmed the prior tests were only 3-frame/120-step and 6-frame/600-step smoke experiments, not formal 3DGS training.
+  - Identified that smoke renders should validate scene export and renderer plumbing only, not justify downstream integration.
+  - Confirmed the formal mapper must keep using the point-cloud BEV until a standalone Gaussian result passes visual QA.
+- Fix:
+  - Removed Gaussian execution from `src/pipeline.py`; semantic segmentation and occupancy no longer consume Gaussian BEV products.
+  - Removed the `gaussian:` block from `configs/default.yaml`.
+  - Deleted the pipeline Gaussian runner `src/gaussian.py` and old Gaussian pipeline configs.
+  - Kept `tools/render_gaussian_bev.py` as a standalone QA renderer only.
+  - Changed the Streamlit tab to `3DGS QA` and removed controls that could enable Gaussian BEV for semantic/occupancy.
+  - Renamed BEV click helpers to `src/alignment_bev.py`; alignment point selection is now explicitly based on the ground-aligned point-cloud BEV.
+  - Updated `goal.md` and README so Gaussian BEV is described as a quality-gate experiment, not an accepted planner input.
+- Next route:
+  - Re-export a denser VGGT-COLMAP scene using relaxed Duckietown road/line confidence masks.
+  - Train 3DGS standalone on `cluster-gpu03` GPU 1 for a real step budget.
+  - Render high-resolution BEV QA products and inspect them visually before any downstream integration is reconsidered.
+
+### Issue: 10k 3DGS top-down BEV is unusable despite formal training
+
+- Symptom:
+  - A 12-keyframe, 900k-point VGGT-COLMAP scene was trained with gsplat for 10k steps on `cluster-gpu03` GPU 1.
+  - Training completed successfully:
+    - checkpoint: `outputs/track_map_3dgs_qa_dense_scene/gaussian_training_dense_10k_v1/ckpts/ckpt_9999_rank0.pt`
+    - final Gaussians: `1304928`
+  - Top-down orthographic BEV render was still unusable:
+    - output: `outputs/track_map_3dgs_qa_dense_scene/gaussian_bev_dense_10k_ground_w2400/gaussian_bev_rgb.png`
+    - size: `2400 x 2594`
+    - artifact: bright streaking / floaters / warped road texture
+  - Ground-plane center projection reduced the streaking but still produced a point-cloud-like texture with wrong / unstable track layout:
+    - output: `outputs/track_map_3dgs_qa_dense_scene/gaussian_plane_bev_dense_10k_z006_sigma3_w2400/gaussian_plane_bev_rgb.png`
+- Diagnosis route:
+  - Rendered the trained 3DGS from the original COLMAP camera views and compared against the source keyframes:
+    - all-view contact sheet: `outputs/track_map_3dgs_qa_dense_scene/camera_view_renders_dense_10k/camera_view_contact_sheet.png`
+    - train-only contact sheet: `outputs/track_map_3dgs_qa_dense_scene/camera_view_renders_dense_10k_train_only/camera_view_contact_sheet.png`
+  - Train-only camera views matched well:
+    - mean PSNR: `38.28 dB`
+    - most training views: `36-41 dB`
+  - Held-out views `0` and `8` were poor because gsplat's default `test_every=8` excludes them from training.
+  - Conclusion:
+    - The 3DGS training/camera flow is basically sane for observed camera views.
+    - The failure is the extreme unobserved top-down BEV render, not a simple “not enough steps” problem.
+    - Standard perspective-trained 3DGS is not sufficient by itself for planner-grade orthographic BEV texture from this monocular sequence.
+- Next route:
+  - Do not connect this output to the mapper pipeline.
+  - If 3DGS remains the desired Level-2 route, add BEV-specific supervision / constraints instead of relying on a novel top-down render:
+    - train with additional synthesized/optimized overhead supervision,
+    - constrain or regularize ground-plane Gaussians,
+    - or optimize a dedicated 2D BEV texture from multi-view projections after geometry alignment.
+
+### Issue: 508 training frames are for 3DGS, not for a single VGGT pass
+
+- Symptom:
+  - The user requested every 3rd video frame for Gaussian training.
+  - A first attempt to run VGGT on all every-3 frames failed with CUDA OOM, which is expected for 508 frames and was the wrong interpretation of the request.
+- Diagnosis route:
+  - Verified `track.mp4` metadata:
+    - total frames: `1523`
+    - FPS: `30.00019698093881`
+    - every-3 selection: `508` frames, frame indices `0, 3, 6, ..., 1521`
+  - Clarified the intended separation:
+    - VGGT seed reconstruction should use a small keyframe set for global geometry / map anchoring.
+    - 3DGS training should use the dense every-3 frame set, but every training image still needs a camera pose.
+  - Directly using VGGT output is insufficient for 508-frame 3DGS training unless VGGT has produced poses for all 508 images.
+  - The raw 1280x720 video frames and VGGT's exported sparse model also do not share guaranteed 2D feature coordinates, so blindly registering raw frames into the VGGT sparse model is fragile.
+- Fix route in progress:
+  - Extracted 508 raw training frames to `outputs/track_map_3dgs_qa_every3_colmap_scene/images`.
+  - Built SIFT features for all 508 frames using CPU `pycolmap` because the available pycolmap wheel has no CUDA SIFT support.
+  - Added `duckietown_offline_mapper/tools/prepare_every3_gaussian_scene.py` as a resumable every-N-frame COLMAP scene-prep utility.
+  - Added `duckietown_offline_mapper/tools/align_colmap_scene_to_vggt.py` to align the dense 508-frame SfM scene back to the VGGT seed coordinate frame using shared frame camera centers.
+  - Patched the local gsplat COLMAP dataset so `test_every <= 0` means no validation holdout; this is required for all registered every-3 frames to enter training.
+- Current run:
+  - Host/GPU: `cluster-gpu03`, GPU 1 reserved for later 3DGS training.
+  - COLMAP feature/matching is CPU-only in the current pycolmap environment.
+  - Sequential matching is running from a clean `matches` / `two_view_geometries` state after an earlier monitor query locked SQLite.
+
+### Issue: cluster-gpu03 overload / ssh refused during 508-frame 3DGS training
+
+- Symptom:
+  - After starting 508-frame gsplat training on `cluster-gpu03` GPU 1, new SSH connections to `cluster-gpu03` returned `Connection refused`.
+  - The user's GPU monitor showed GPU 0 at `23972 MiB / 24564 MiB` under another user's `python` process and GPU 1 with the mapper training process at about `1324 MiB`.
+  - Training log stopped updating at about `3252 / 30000` steps and no checkpoint had been written yet.
+- Diagnosis route:
+  - The mapper training command explicitly used `CUDA_VISIBLE_DEVICES=1`, so it did not allocate on physical GPU 0.
+  - GPU 0 pressure was from another user's process, not the mapper run.
+  - The mapper run on GPU 1 was low-memory at the time of inspection, but keeping it alive while `cluster-gpu03` refused SSH was unsafe.
+  - Direct SSH and side-path SSH via `cluster-gpu01` / `cluster-gpu04` to `cluster-gpu03` both failed with `Connection refused`.
+- Immediate action:
+  - Sent interrupt to the active SSH training session.
+  - Verified locally that no `simple_trainer` process remained on the local host; remote confirmation is blocked until `cluster-gpu03` accepts SSH again.
+  - If the GPU monitor still shows `PID 4130324` for `hanzhiyu .venv-gsplat/bin/python`, kill that orphan process on `cluster-gpu03`.
+- Follow-up:
+  - Do not restart long 3DGS training on `cluster-gpu03` until the host is reachable and GPU/process ownership is clear.
+  - Prefer a resumable shorter checkpoint cadence next time so a host interruption does not lose the run before the first checkpoint.
+
+### Issue: GPU monitor looked like the mapper crashed cluster-gpu03
+
+- Symptom:
+  - The user's monitor showed `cluster-gpu03` GPU 0 at `24517 / 24564 MiB`, `99%` utilization under user `fischer`.
+  - The same monitor showed the mapper's `.venv-gsplat/bin/python` under user `hanzhiyu` on GPU 1 at about `1830 MiB`.
+  - The node then became unreliable for new SSH / process queries.
+- Diagnosis route:
+  - Rechecked the launch command: the mapper training process was started with `CUDA_VISIBLE_DEVICES=1`.
+  - Reconnected to `cluster-gpu03` when possible and confirmed the host responded, but GPU/process queries were unreliable.
+  - Local process inspection showed no local `simple_trainer` job left behind.
+- Conclusion:
+  - The screenshot does not show the mapper filling GPU 0; GPU 0 was occupied by another user's process.
+  - Running long training on the same unhealthy node was still a mistake operationally, because a node-level failure can kill or strand the mapper job even when our own VRAM use is low.
+- Fix / policy:
+  - Treat `cluster-gpu03` as unavailable for long 3DGS training until it is stable and process ownership is clear.
+  - Use shorter checkpoint intervals for the next full 3DGS run.
+  - Do not start another formal 3DGS training run until the standalone QA setup and target GPU are explicitly verified.
+
+## 3DGS Standalone-Only Retraction Finalization
+
+Date: 2026-06-27
+
+- The codebase was found to still contain the earlier Gaussian pipeline wiring:
+  - `src/pipeline.py` could call the Gaussian runner and replace `bev_rgb` with a Gaussian render.
+  - Streamlit exposed a `Run Gaussian BEV pipeline` button.
+  - `README.md` and `goal.md` still described Gaussian BEV as a semantic input when enabled.
+- Final correction:
+  - Removed Gaussian execution from `src/pipeline.py`.
+  - Removed the default `gaussian:` config block.
+  - Removed old Gaussian pipeline configs and the pipeline Gaussian subprocess runner.
+  - Renamed the UI tab to `3DGS QA` and limited it to inspection of standalone render artifacts and logs.
+  - Kept standalone QA tools:
+    - `tools/prepare_every3_gaussian_scene.py`
+    - `tools/align_colmap_scene_to_vggt.py`
+    - `tools/render_gsplat_camera_views.py`
+    - `tools/render_gaussian_plane_bev.py`
+    - `tools/render_gaussian_bev.py`
+- Current quality gate:
+  - Semantic segmentation and occupancy export use the point-cloud BEV raster.
+  - Gaussian renders are debug / QA artifacts only.
+  - A future promotion to pipeline input requires realistic source-camera renders and a stable, planner-readable BEV texture.

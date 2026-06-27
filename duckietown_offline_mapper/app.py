@@ -11,6 +11,7 @@ import streamlit as st
 import yaml
 
 from src.alignment import estimate_sim2
+from src.alignment_bev import bev_pixel_to_world_xy
 from src.bev import metadata_from_bounds
 from src.io_utils import deep_update, load_yaml
 from src.keyframes import extract_keyframes, load_image_folder
@@ -84,6 +85,26 @@ def _run_pipeline_subprocess(config: dict) -> dict:
     summary_path = output_dir / "run_summary.yaml"
     summary = yaml.safe_load(summary_path.read_text(encoding="utf-8")) or {}
     return summary.get("result", {})
+
+
+def _saved_result(export_dir: str) -> dict:
+    summary_path = Path(export_dir) / "run_summary.yaml"
+    if not summary_path.exists():
+        return {}
+    summary = yaml.safe_load(summary_path.read_text(encoding="utf-8")) or {}
+    return summary.get("result", {})
+
+
+def _active_result(export_dir: str) -> dict:
+    return st.session_state.get("last_run") or _saved_result(export_dir)
+
+
+def _file_tail(path: str | Path, max_lines: int = 80) -> str:
+    path = Path(path)
+    if not path.exists():
+        return f"{path} does not exist"
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-max_lines:])
 
 
 @st.cache_data(show_spinner=False)
@@ -227,9 +248,7 @@ def _render_clickable_bev_hd(
 
 def _bev_display_pixel_to_world(click_x: float, click_y: float, image: np.ndarray, metadata) -> tuple[float, float]:
     height, width = image.shape[:2]
-    x = metadata.x_min + (float(click_x) + 0.5) / max(width, 1) * (metadata.x_max - metadata.x_min)
-    y = metadata.y_max - (float(click_y) + 0.5) / max(height, 1) * (metadata.y_max - metadata.y_min)
-    return float(x), float(y)
+    return bev_pixel_to_world_xy(click_x, click_y, width, height, metadata)
 
 
 def _point_cloud_figure(
@@ -330,6 +349,7 @@ tabs = st.tabs(
         "Input",
         "Reconstruction",
         "Ground Plane",
+        "3DGS QA",
         "Alignment",
         "Crop / ROI",
         "BEV",
@@ -519,6 +539,99 @@ with tabs[2]:
         st.write({"plane": plane.coefficients.tolist(), "ground": plane.ground_count, "non_ground": plane.non_ground_count})
 
 with tabs[3]:
+    st.subheader("3DGS QA")
+    st.warning("Standalone quality gate: Gaussian renders are not connected to semantic segmentation or occupancy export.")
+    qa = config.setdefault("gaussian_qa", {})
+    c1, c2, c3 = st.columns(3)
+    qa["seed_scene"] = c1.text_input(
+        "VGGT seed gsplat scene",
+        value=str(qa.get("seed_scene", "outputs/track_map_3dgs_qa_dense_scene/work/gsplat_scene")),
+    )
+    qa["dense_scene"] = c2.text_input(
+        "Dense every-3 COLMAP scene",
+        value=str(qa.get("dense_scene", "outputs/track_map_3dgs_qa_every3_aligned_vggt_scene")),
+    )
+    qa["checkpoint"] = c3.text_input(
+        "3DGS checkpoint",
+        value=str(
+            qa.get(
+                "checkpoint",
+                "outputs/track_map_3dgs_qa_dense_scene/gaussian_training_dense_10k_v1/ckpts/ckpt_9999_rank0.pt",
+            )
+        ),
+    )
+
+    c1, c2 = st.columns(2)
+    qa["camera_contact_sheet"] = c1.text_input(
+        "Camera-view contact sheet",
+        value=str(
+            qa.get(
+                "camera_contact_sheet",
+                "outputs/track_map_3dgs_qa_dense_scene/camera_view_renders_dense_10k_train_only/"
+                "camera_view_contact_sheet.png",
+            )
+        ),
+    )
+    qa["plane_bev"] = c2.text_input(
+        "Plane BEV preview",
+        value=str(
+            qa.get(
+                "plane_bev",
+                "outputs/track_map_3dgs_qa_dense_scene/gaussian_plane_bev_dense_10k_z006_sigma3_w2400/"
+                "gaussian_plane_bev_rgb.png",
+            )
+        ),
+    )
+
+    st.write(
+        {
+            "pipeline_input": False,
+            "quality_gate": "not_approved",
+            "semantic_bev_source": "point_cloud_raster",
+        }
+    )
+
+    image_specs = [
+        (qa.get("camera_contact_sheet"), "Camera-view render QA"),
+        (qa.get("plane_bev"), "Plane-projected BEV QA"),
+    ]
+    columns = st.columns(2)
+    for column, (path, title) in zip(columns, image_specs):
+        path_obj = Path(str(path)) if path else None
+        if path_obj and path_obj.exists():
+            column.image(str(path_obj), caption=title, use_container_width=True)
+        else:
+            column.info(f"Missing: {path}")
+
+    metrics_path = Path(str(qa.get("camera_contact_sheet", ""))).parent / "camera_view_metrics.json"
+    if metrics_path.exists():
+        try:
+            metrics = yaml.safe_load(metrics_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            metrics = {}
+        if metrics:
+            st.write(
+                {
+                    "camera_view_mean_psnr": metrics.get("mean_psnr"),
+                    "num_gaussians": metrics.get("num_gaussians"),
+                    "metrics_path": str(metrics_path),
+                }
+            )
+
+    qa["train_log"] = st.text_input(
+        "Training log",
+        value=str(
+            qa.get(
+                "train_log",
+                "outputs/track_map_3dgs_qa_every3_aligned_vggt_scene/gaussian_training_every3_30k_v1/train.log",
+            )
+        ),
+    )
+    if Path(str(qa["train_log"])).exists():
+        with st.expander("Training log tail"):
+            st.code(_file_tail(qa["train_log"]))
+
+with tabs[4]:
     try:
         from streamlit_image_coordinates import streamlit_image_coordinates
     except Exception:
@@ -528,9 +641,10 @@ with tabs[3]:
         st.session_state.alignment_control_points = list(config["alignment"].get("control_points", []))
 
     st.subheader("Planar Control Points")
+    export_dir = config["export"].get("output_dir", "outputs/track_map")
     alignment_path = st.text_input(
         "Ground-aligned source point cloud",
-        value=_default_alignment_source_path(config["export"].get("output_dir", "outputs/track_map")),
+        value=_default_alignment_source_path(export_dir),
     )
     c1, c2, c3, c4 = st.columns(4)
     alignment_resolution = c1.slider("Alignment bounds resolution", 0.005, 0.050, 0.015, 0.005)
@@ -623,7 +737,7 @@ with tabs[3]:
         )
         st.write({"scale": res.scale, "rms_error": res.rms_error, "transform": res.transform.tolist()})
 
-with tabs[4]:
+with tabs[5]:
     roi = config["roi"]
     roi["auto"] = st.checkbox("Auto ROI from reconstructed cloud percentiles", value=bool(roi.get("auto", True)))
     c1, c2, c3 = st.columns(3)
@@ -637,7 +751,7 @@ with tabs[4]:
     roi["y_max"] = c4.number_input("y_max", value=float(roi.get("y_max", 1.0)))
     st.caption("Polygon ROI hook is reserved; rectangular ROI is exported in this implementation.")
 
-with tabs[5]:
+with tabs[6]:
     config["bev"]["resolution"] = st.slider("Resolution (m/cell)", 0.005, 0.100, float(config["bev"].get("resolution", 0.02)), 0.005)
     if st.button("Run BEV rasterization preview"):
         try:
@@ -645,11 +759,16 @@ with tabs[5]:
             with st.spinner("Running pipeline in an isolated subprocess..."):
                 res = _run_pipeline_subprocess(config)
             st.session_state.last_run = res
-            st.image(res["paths"]["bev_rgb"], use_container_width=True)
         except Exception as exc:
             st.error(str(exc))
+    last = _active_result(config["export"].get("output_dir", "outputs/track_map"))
+    if last:
+        source = last.get("project_metadata", {}).get("bev_generation", {}).get("source", "unknown")
+        st.caption(f"Current BEV source: {source}")
+        if last.get("paths", {}).get("bev_rgb") and Path(last["paths"]["bev_rgb"]).exists():
+            st.image(last["paths"]["bev_rgb"], caption="BEV RGB used by segmentation", use_container_width=True)
 
-with tabs[6]:
+with tabs[7]:
     seg = config["segmentation"]
     seg["road_v_max"] = st.slider("Road V max", 0, 255, int(seg.get("road_v_max", 95)))
     seg["road_s_max"] = st.slider("Road S max", 0, 255, int(seg.get("road_s_max", 115)))
@@ -657,11 +776,11 @@ with tabs[6]:
     seg["yellow_s_min"] = st.slider("Yellow S min", 0, 255, int(seg.get("yellow_s_min", 60)))
     seg["morphology_open"] = st.slider("Opening radius", 0, 10, int(seg.get("morphology_open", 1)))
     seg["morphology_close"] = st.slider("Closing radius", 0, 15, int(seg.get("morphology_close", 3)))
-    last = st.session_state.get("last_run")
+    last = _active_result(config["export"].get("output_dir", "outputs/track_map"))
     if last:
         st.image(last["paths"]["semantic_mask"], use_container_width=True)
 
-with tabs[7]:
+with tabs[8]:
     occ = config["occupancy"]
     occ["non_ground_height_threshold"] = st.slider(
         "Non-ground height threshold (m)", 0.01, 0.30, float(occ.get("non_ground_height_threshold", 0.06)), 0.01
@@ -669,12 +788,12 @@ with tabs[7]:
     occ["robot_radius"] = st.slider("Robot radius (m)", 0.02, 0.25, float(occ.get("robot_radius", 0.085)), 0.005)
     occ["safety_margin"] = st.slider("Safety margin (m)", 0.0, 0.20, float(occ.get("safety_margin", 0.025)), 0.005)
     occ["unknown_as_occupied"] = st.checkbox("Unknown as occupied", value=bool(occ.get("unknown_as_occupied", False)))
-    last = st.session_state.get("last_run")
+    last = _active_result(config["export"].get("output_dir", "outputs/track_map"))
     if last:
         st.write(last["stats"])
         st.image(last["paths"]["final_occupancy_grid"], use_container_width=True)
 
-with tabs[8]:
+with tabs[9]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))
     config["export"]["map_frame"] = st.text_input("Map frame", value=config["export"].get("map_frame", "map"))
     config_file = st.file_uploader("Optional YAML override", type=["yaml", "yml"])

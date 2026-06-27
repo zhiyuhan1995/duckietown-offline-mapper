@@ -243,20 +243,17 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
 
     def _fuse_predictions_to_cloud(self, predictions: dict[str, np.ndarray], images: Any, torch: Any) -> PointCloud:
         points_3d = predictions["points_3d"]
-        point_conf = predictions["point_conf"]
-        if point_conf.ndim == 4 and point_conf.shape[-1] == 1:
-            point_conf = point_conf[..., 0]
-
+        point_conf = _squeeze_confidence(predictions["point_conf"])
         colors = _resized_image_colors(images, points_3d.shape[1:3], torch)
-        finite = np.isfinite(points_3d).all(axis=-1)
-        mask = finite & (point_conf >= self.confidence_threshold)
-        ground_color_mask = _duckietown_ground_color_mask(colors)
-        if self.relax_ground_confidence:
-            mask |= finite & ground_color_mask & (point_conf >= self.ground_confidence_threshold)
-        if self.sample_stride > 1:
-            stride_mask = np.zeros(mask.shape, dtype=bool)
-            stride_mask[:, :: self.sample_stride, :: self.sample_stride] = True
-            mask &= stride_mask
+        mask = _vggt_keep_mask(
+            points_3d,
+            point_conf,
+            colors,
+            confidence_threshold=self.confidence_threshold,
+            relax_ground_confidence=self.relax_ground_confidence,
+            ground_confidence_threshold=self.ground_confidence_threshold,
+            sample_stride=self.sample_stride,
+        )
         if not np.any(mask):
             raise RuntimeError(
                 "VGGT produced no points after confidence filtering. "
@@ -307,7 +304,7 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
     ) -> dict[str, Any]:
         try:
             import torch.nn.functional as F  # type: ignore
-            from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues  # type: ignore
+            from vggt.utils.helper import create_pixel_coordinate_grid  # type: ignore
             from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap_wo_track  # type: ignore
         except Exception as exc:
             raise VGGTDependencyError(
@@ -316,18 +313,25 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
             ) from exc
 
         points_3d = predictions["points_3d"]
-        point_conf = predictions["point_conf"]
-        if point_conf.ndim == 4 and point_conf.shape[-1] == 1:
-            point_conf = point_conf[..., 0]
+        point_conf = _squeeze_confidence(predictions["point_conf"])
         num_frames, height, width, _ = points_3d.shape
         points_rgb = F.interpolate(images, size=(height, width), mode="bilinear", align_corners=False)
         points_rgb = (_as_numpy(points_rgb) * 255.0).clip(0, 255).astype(np.uint8).transpose(0, 2, 3, 1)
         points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
-        conf_mask = randomly_limit_trues(point_conf >= self.confidence_threshold, self.max_points)
+        keep_mask = _vggt_keep_mask(
+            points_3d,
+            point_conf,
+            points_rgb,
+            confidence_threshold=self.confidence_threshold,
+            relax_ground_confidence=self.relax_ground_confidence,
+            ground_confidence_threshold=self.ground_confidence_threshold,
+            sample_stride=1,
+        )
+        selected_mask = _limit_mask(keep_mask, self.max_points, self.seed)
         reconstruction = batch_np_matrix_to_pycolmap_wo_track(
-            points_3d[conf_mask],
-            points_xyf[conf_mask],
-            points_rgb[conf_mask],
+            points_3d[selected_mask],
+            points_xyf[selected_mask],
+            points_rgb[selected_mask],
             predictions["extrinsic"],
             predictions["intrinsic"],
             np.array([height, width]),
@@ -345,6 +349,10 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
             "sparse_dir": str(sparse_dir),
             "gsplat_scene_dir": str(gsplat_scene_dir),
             "image_names": [p.name for p in image_paths],
+            "selected_points": int(np.count_nonzero(selected_mask)),
+            "candidate_points": int(np.count_nonzero(keep_mask)),
+            "uses_relaxed_ground_mask": bool(self.relax_ground_confidence),
+            "ground_confidence_threshold": float(self.ground_confidence_threshold),
         }
 
     def _export_colmap_with_ba(
@@ -533,6 +541,44 @@ def _resized_image_colors(images: Any, size_hw: tuple[int, int], torch: Any) -> 
     resized = F.interpolate(images, size=size_hw, mode="bilinear", align_corners=False)
     colors = (_as_numpy(resized) * 255.0).clip(0, 255).astype(np.uint8)
     return colors.transpose(0, 2, 3, 1)
+
+
+def _squeeze_confidence(confidence: np.ndarray) -> np.ndarray:
+    if confidence.ndim == 4 and confidence.shape[-1] == 1:
+        return confidence[..., 0]
+    return confidence
+
+
+def _vggt_keep_mask(
+    points_3d: np.ndarray,
+    point_conf: np.ndarray,
+    colors: np.ndarray,
+    *,
+    confidence_threshold: float,
+    relax_ground_confidence: bool,
+    ground_confidence_threshold: float,
+    sample_stride: int,
+) -> np.ndarray:
+    finite = np.isfinite(points_3d).all(axis=-1) & np.isfinite(point_conf)
+    mask = finite & (point_conf >= confidence_threshold)
+    if relax_ground_confidence:
+        mask |= finite & _duckietown_ground_color_mask(colors) & (point_conf >= ground_confidence_threshold)
+    if sample_stride > 1:
+        stride_mask = np.zeros(mask.shape, dtype=bool)
+        stride_mask[:, ::sample_stride, ::sample_stride] = True
+        mask &= stride_mask
+    return mask
+
+
+def _limit_mask(mask: np.ndarray, max_points: int, seed: int) -> np.ndarray:
+    if not max_points or np.count_nonzero(mask) <= max_points:
+        return mask
+    selected_indices = np.flatnonzero(mask)
+    rng = np.random.default_rng(seed)
+    keep_indices = rng.choice(selected_indices, size=max_points, replace=False)
+    limited = np.zeros(mask.size, dtype=bool)
+    limited[keep_indices] = True
+    return limited.reshape(mask.shape)
 
 
 def _duckietown_ground_color_mask(colors: np.ndarray) -> np.ndarray:

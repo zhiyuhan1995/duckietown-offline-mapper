@@ -1,0 +1,46 @@
+input:
+  path: track.mp4
+  keyframe_interval: 120
+  max_keyframes: 12
+
+reconstruction:
+  backend: vggt_sfm
+  vggt:
+    model_id: facebook/VGGT-1B
+    checkpoint_url: null
+    device: cuda
+    dtype: auto
+    preprocess_mode: crop
+    use_point_map: false
+    confidence_threshold: 4.0
+    relax_ground_confidence: true
+    ground_confidence_threshold: 0.8
+    max_points: 900000
+    sample_stride: 1
+    seed: 7
+    save_depth: false
+  sfm:
+    save_colmap: true
+    bundle_adjustment: false
+
+ground_plane:
+  distance_threshold: 0.025
+  max_iterations: 1000
+
+alignment:
+  mode: sim2
+  control_points: []
+
+roi:
+  auto: true
+  percentile_low: 0.5
+  percentile_high: 99.5
+  padding: 0.15
+
+bev:
+  resolution: 0.015
+  unknown_rgb: [80, 80, 80]
+
+export:
+  output_dir: outputs/track_map_3dgs_qa_dense_scene
+  map_frame: map
