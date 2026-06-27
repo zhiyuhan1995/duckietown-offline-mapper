@@ -363,3 +363,44 @@ Date: 2026-06-27
   - Restarted Streamlit on `cluster-gpu01` with GPU-hidden UI process.
   - Remote Streamlit PID: `38874`
   - Browser URL: `http://localhost:8501`
+
+## 3DGS Pipeline Upgrade Start
+
+Date: 2026-06-27
+
+- User requested a Level-2 3D Gaussian Splatting stage after VGGT-SfM.
+- Intended updated flow:
+  - VGGT-SfM reconstructs cameras, geometry, and a bootstrap point cloud.
+  - A coarse RANSAC ground plane defines the initial BEV/top-down coordinate system.
+  - VGGT predictions are exported as a COLMAP-style scene.
+  - 3D Gaussian Splatting is trained from the VGGT-COLMAP scene.
+  - A top-down orthographic BEV texture / alpha / height product is rendered from the optimized Gaussian scene.
+  - Downstream crop, semantic segmentation, and occupancy should prefer the Gaussian-rendered BEV products over the raw point-cloud raster.
+- Repository archive before 3DGS work:
+  - Added `.gitignore` excluding conda environments, caches, videos, outputs, logs, point clouds, images, and numpy result arrays.
+  - Initialized local Git repo on branch `main`.
+  - Initial archive commit: `5281fa1 archive current duckietown mapper`.
+  - Tracked file count: 30.
+  - Confirmed ignored:
+    - `track.mp4`
+    - `outputs/`
+    - `logs/`
+    - `.conda-vggt/`
+    - `.conda-vggt-bw/`
+  - Created remote bare repository on `cluster-gpu03`: `/home/hanzhiyu/git/duckietown-offline-mapper.git`.
+  - Added remote `origin`: `cluster-gpu03:/home/hanzhiyu/git/duckietown-offline-mapper.git`.
+  - Pushed `main` to `origin/main`.
+- GitHub note:
+  - GitHub SSH authentication works for user `zhiyuhan1995`.
+  - `gh` is not installed and no `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT` is available.
+  - The available GitHub connector can operate on existing repositories but does not expose repository creation.
+  - The cluster bare repo is the current remote archive; a GitHub repo can be added later when an empty repo exists or `gh` / token auth is available.
+- cluster-gpu03 check:
+  - Host reachable as `cluster-gpu03`.
+  - GPUs: two NVIDIA GeForce RTX 4090 cards.
+  - `.conda-vggt` uses torch `2.3.1+cu121` and sees both GPUs.
+  - `vggt`, `pycolmap`, `cv2`, and `open3d` import successfully.
+  - `gsplat` is not installed yet.
+- Documentation updated:
+  - Rewrote `goal.md` for the two-stage VGGT bootstrap plus Level-2 3DGS BEV pipeline.
+  - Filled `story.md` with the motivation for replacing point-cloud BEV with Gaussian-rendered continuous BEV texture.
