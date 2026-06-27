@@ -736,16 +736,24 @@ Date: 2026-06-27
     - memory: about `22.7 GiB`
   - Confirmed `cluster-gpu02` GPU 2 was available and compatible with `.venv-gsplat`.
 - Fix route:
-  - Started gsplat's `simple_viewer.py` on `cluster-gpu02` GPU 2.
+  - First viewer launch used `PYTHONPATH=external/gsplat-v1.3.0:external/gsplat-v1.3.0/examples`, which accidentally shadowed the installed gsplat wheel with the source tree.
+  - Symptom from that bad launch:
+    - `gsplat: No CUDA toolkit found. gsplat will be disabled.`
+    - render request failed with `AttributeError: 'NoneType' object has no attribute 'fully_fused_projection_packed_fwd'`
+  - Corrected launch to match the successful training/render commands:
+    - `PYTHONPATH=external/gsplat-v1.3.0/examples`
+    - this keeps the prebuilt gsplat CUDA wheel active.
+  - Restarted gsplat's `simple_viewer.py` on `cluster-gpu02` GPU 2.
   - Remote listener:
     - host: `cluster-gpu02`
     - port: `8097`
     - process: `.venv-gsplat/bin/python external/gsplat-v1.3.0/examples/simple_viewer.py`
+    - current PID: `2268653`
     - checkpoint: `ckpt_29999_rank0.pt`
     - observed viewer GPU memory: about `930 MiB`
   - Added local SSH port forwarding:
     - local URL: `http://127.0.0.1:8097`
     - forward: `8097 -> cluster-gpu02:8097`
 - Verification:
-  - Local HTTP probe returned status `200` for `http://127.0.0.1:8097`.
+  - Local HTTP probe returned status `200` twice for `http://127.0.0.1:8097`.
   - Remote `viser` log reports both HTTP and websocket endpoints on port `8097`.
