@@ -1,7 +1,7 @@
 input:
   path: track.mp4
-  keyframe_interval: 120
-  max_keyframes: 12
+  keyframe_interval: 60
+  max_keyframes: 24
 
 reconstruction:
   backend: vggt_sfm
@@ -12,11 +12,11 @@ reconstruction:
     dtype: auto
     preprocess_mode: crop
     use_point_map: false
-    confidence_threshold: 5.0
+    confidence_threshold: 1.0
     relax_ground_confidence: true
-    ground_confidence_threshold: 1.2
-    max_points: 250000
-    sample_stride: 2
+    ground_confidence_threshold: 1.0
+    max_points: 600000
+    sample_stride: 1
     seed: 7
     save_depth: false
   sfm:

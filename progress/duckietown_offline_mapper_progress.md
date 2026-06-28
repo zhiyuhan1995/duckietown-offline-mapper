@@ -363,3 +363,64 @@ Date: 2026-06-27
   - Restarted Streamlit on `cluster-gpu01` with GPU-hidden UI process.
   - Remote Streamlit PID: `38874`
   - Browser URL: `http://localhost:8501`
+
+## VGGT Camera-Guided Ground Texture BEV
+
+Date: 2026-06-28
+
+- User-approved route:
+  - Stop pursuing 3D Gaussian rendering for this mapper stage.
+  - Use VGGT's reconstructed point cloud and camera intrinsics / extrinsics.
+  - Fit the ground plane with RANSAC, align it to `z=0`, then inverse-project BEV ground cells into all VGGT camera views.
+  - Fuse sampled image pixels into a continuous ground-plane texture BEV.
+- User-selected VGGT reconstruction parameters:
+  - `keyframe_interval: 60`
+  - `max_keyframes: 24`
+  - `confidence_threshold: 1.0`
+  - `sample_stride: 1`
+  - `max_points: 600000`
+  - `relax_ground_confidence: true`
+  - `ground_confidence_threshold: 1.0`
+  - `use_point_map: false`
+  - `save_colmap: true`
+  - `bundle_adjustment: false`
+- Implementation:
+  - Added `src/ground_texture.py`.
+  - Added `tools/render_ground_texture_bev.py`.
+  - Added a Streamlit `Ground Texture` tab.
+  - Updated default config to the user-selected VGGT settings.
+- Fusion method:
+  - Generate a BEV grid in the map / ground-aligned plane.
+  - Transform each BEV cell center back into VGGT raw reconstruction coordinates.
+  - Project that ground point into each VGGT camera with saved `camera_extrinsics.npy` and `camera_intrinsics.npy`.
+  - Sample the VGGT-preprocessed image with bilinear interpolation.
+  - Weight samples by view angle, camera distance, image-border margin, and VGGT confidence.
+  - Export fused texture, raw texture, observed mask, weight map, and observation-count map.
+- Troubleshooting:
+  - Initial run failed because RGB sampling returned a full-length BEV array while the caller assigned it only to the valid subset.
+  - Fixed by treating RGB samples as full-length arrays.
+  - Second run exposed the same issue for confidence sampling.
+  - Fixed confidence sampling the same way.
+- First successful output:
+  - Source run: `outputs/track_map/run_summary.yaml`
+  - Source images / cameras: `24`
+  - Output: `outputs/track_map/ground_texture_bev`
+  - Resolution: `0.005 m/pixel`
+  - Size: `280 x 266`
+  - Observed pixels: `71207 / 74480`
+  - Observed fraction: `0.9561`
+  - Mean observations per observed pixel: `8.92`
+- High-resolution output:
+  - Output: `outputs/track_map/ground_texture_bev_r002`
+  - Resolution: `0.002 m/pixel`
+  - Size: `698 x 664`
+  - Observed pixels: `443484 / 463472`
+  - Observed fraction: `0.9569`
+  - Mean observations per observed pixel: `8.94`
+  - Visual check: produces a continuous, readable top-down Duckietown ground texture with road, lane markings, stop lines, and floor context.
+- Fusion comparison:
+  - `best_view` preserves sharper lane boundaries and is the current default.
+  - `weighted_mean` reduces some seams but blurs lane markings and signs, so it is kept as an option rather than the default.
+- Verification:
+  - `python -m py_compile duckietown_offline_mapper/src/ground_texture.py duckietown_offline_mapper/tools/render_ground_texture_bev.py duckietown_offline_mapper/app.py`: passed
+  - `python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`

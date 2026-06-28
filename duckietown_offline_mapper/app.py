@@ -12,6 +12,7 @@ import yaml
 
 from src.alignment import estimate_sim2
 from src.bev import metadata_from_bounds
+from src.ground_texture import render_ground_texture_bev
 from src.io_utils import deep_update, load_yaml
 from src.keyframes import extract_keyframes, load_image_folder
 from src.plane import fit_ground_plane
@@ -123,6 +124,26 @@ def _default_alignment_source_path(export_dir: str) -> str:
         if path.exists():
             return str(path)
     return str(candidates[0])
+
+
+def _default_run_summary_path(export_dir: str) -> str:
+    candidates = [
+        Path(export_dir) / "run_summary.yaml",
+        Path("outputs/track_map") / "run_summary.yaml",
+        Path("outputs/track_map_cluster_gpu01_edge_complete") / "run_summary.yaml",
+        Path("outputs/track_map_edge_complete") / "run_summary.yaml",
+    ]
+    existing = [path for path in candidates if path.exists()]
+    if existing:
+        return str(max(existing, key=lambda path: path.stat().st_mtime))
+    return str(candidates[0])
+
+
+def _default_ground_texture_output_dir(run_summary_path: str) -> str:
+    path = Path(run_summary_path)
+    if path.name == "run_summary.yaml":
+        return str(path.parent / "ground_texture_bev")
+    return "outputs/ground_texture_bev"
 
 
 def _auto_metadata_for_cloud(cloud: PointCloud, resolution: float):
@@ -333,6 +354,7 @@ tabs = st.tabs(
         "Alignment",
         "Crop / ROI",
         "BEV",
+        "Ground Texture",
         "Semantic",
         "Occupancy",
         "Export",
@@ -650,6 +672,73 @@ with tabs[5]:
             st.error(str(exc))
 
 with tabs[6]:
+    st.subheader("VGGT Camera-Guided Ground Plane Texture")
+    st.caption("Inverse-project BEV ground cells into the VGGT camera views and fuse sampled pixels on the fitted z=0 plane.")
+    run_summary_path = st.text_input(
+        "Run summary",
+        value=_default_run_summary_path(config["export"].get("output_dir", "outputs/track_map")),
+        key="ground_texture_run_summary",
+    )
+    output_dir = st.text_input(
+        "Output directory",
+        value=_default_ground_texture_output_dir(run_summary_path),
+        key="ground_texture_output_dir",
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    texture_resolution = c1.slider("Texture resolution (m/pixel)", 0.002, 0.050, 0.005, 0.001)
+    texture_fusion_mode = c2.selectbox("Fusion mode", ["best_view", "weighted_mean"])
+    texture_padding = c3.number_input("Padding (m)", min_value=0.0, value=0.0, step=0.05)
+    texture_inpaint_radius = c4.slider("Small-hole inpaint radius", 0, 12, 3, 1)
+    c1, c2, c3, c4 = st.columns(4)
+    texture_confidence_scale = c1.number_input(
+        "Confidence scale",
+        min_value=0.001,
+        value=float(config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0)),
+        step=0.1,
+    )
+    texture_view_angle_power = c2.slider("View-angle power", 0.0, 4.0, 1.5, 0.1)
+    texture_distance_power = c3.slider("Distance power", 0.0, 4.0, 1.0, 0.1)
+    texture_border_margin = c4.slider("Image border margin (px)", 0.0, 32.0, 4.0, 1.0)
+
+    if st.button("Render ground texture BEV"):
+        try:
+            with st.spinner("Projecting VGGT camera views onto the fitted ground plane..."):
+                texture_result = render_ground_texture_bev(
+                    run_summary_path=run_summary_path,
+                    output_dir=output_dir,
+                    resolution=float(texture_resolution),
+                    fusion_mode=str(texture_fusion_mode),
+                    padding=float(texture_padding),
+                    confidence_scale=float(texture_confidence_scale),
+                    view_angle_power=float(texture_view_angle_power),
+                    distance_power=float(texture_distance_power),
+                    border_margin_px=float(texture_border_margin),
+                    inpaint_radius=int(texture_inpaint_radius),
+                    unknown_rgb=tuple(int(x) for x in config["bev"].get("unknown_rgb", [80, 80, 80])),
+                )
+            st.session_state.ground_texture_result = texture_result.stats
+            st.success(f"Exported ground texture BEV to {output_dir}")
+        except Exception as exc:
+            st.error(str(exc))
+
+    texture_stats = st.session_state.get("ground_texture_result")
+    if texture_stats:
+        st.write(texture_stats)
+        paths = texture_stats.get("paths", {})
+        cols = st.columns(2)
+        if paths.get("texture"):
+            cols[0].image(paths["texture"], caption="Fused ground texture BEV", use_container_width=True)
+        if paths.get("raw_texture"):
+            cols[1].image(paths["raw_texture"], caption="Raw fused texture before inpaint", use_container_width=True)
+        cols = st.columns(3)
+        if paths.get("observed_mask"):
+            cols[0].image(paths["observed_mask"], caption="Observed mask", use_container_width=True)
+        if paths.get("weight_map"):
+            cols[1].image(paths["weight_map"], caption="Fusion weight", use_container_width=True)
+        if paths.get("observation_count"):
+            cols[2].image(paths["observation_count"], caption="Observation count", use_container_width=True)
+
+with tabs[7]:
     seg = config["segmentation"]
     seg["road_v_max"] = st.slider("Road V max", 0, 255, int(seg.get("road_v_max", 95)))
     seg["road_s_max"] = st.slider("Road S max", 0, 255, int(seg.get("road_s_max", 115)))
@@ -661,7 +750,7 @@ with tabs[6]:
     if last:
         st.image(last["paths"]["semantic_mask"], use_container_width=True)
 
-with tabs[7]:
+with tabs[8]:
     occ = config["occupancy"]
     occ["non_ground_height_threshold"] = st.slider(
         "Non-ground height threshold (m)", 0.01, 0.30, float(occ.get("non_ground_height_threshold", 0.06)), 0.01
@@ -674,7 +763,7 @@ with tabs[7]:
         st.write(last["stats"])
         st.image(last["paths"]["final_occupancy_grid"], use_container_width=True)
 
-with tabs[8]:
+with tabs[9]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))
     config["export"]["map_frame"] = st.text_input("Map frame", value=config["export"].get("map_frame", "map"))
     config_file = st.file_uploader("Optional YAML override", type=["yaml", "yml"])
