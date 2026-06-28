@@ -485,3 +485,24 @@ Date: 2026-06-28
   - Streamlit restarted on `heracleum`; remote PID: `303087`.
   - Local HTTP check: `200`.
   - Browser URL: `http://127.0.0.1:8501`
+
+## Semantic Preview Live Update Fix
+
+Date: 2026-06-28
+
+- Problem:
+  - Moving the Semantic tab sliders did not visibly change the preview image.
+  - Root cause: the tab displayed `last_run["paths"]["semantic_mask"]`, a static PNG exported by the previous pipeline run.
+  - The slider values were written to the in-memory config, but the page did not call `segment_bev_rgb(...)` again for preview.
+- Fix:
+  - Added a live `BEV image for live semantic preview` source path.
+  - The Semantic tab now loads the current `bev_rgb.png`, applies the current slider values, calls `segment_bev_rgb(...)`, and colorizes the result in-page.
+  - Added class pixel counts beside the preview so parameter changes are numerically visible even when the visual change is subtle.
+  - The image loader is cached with file modification time in the key, so overwriting `bev_rgb.png` refreshes the preview instead of reusing stale cache.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Direct comparison with loose vs strict semantic thresholds produced different class-pixel counts on the same BEV source.
+  - Streamlit restarted on `heracleum`; remote PID: `909437`.
+  - Local HTTP check: `200`.
+  - Browser URL: `http://127.0.0.1:8501`

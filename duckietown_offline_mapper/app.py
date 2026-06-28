@@ -17,6 +17,7 @@ from src.io_utils import deep_update, load_yaml
 from src.keyframes import extract_keyframes, load_image_folder
 from src.plane import fit_ground_plane
 from src.pointcloud import PointCloud, load_ply
+from src.segmentation import colorize_semantic, segment_bev_rgb
 
 
 st.set_page_config(page_title="Duckietown Offline Mapper", layout="wide")
@@ -165,6 +166,30 @@ def _resize_rgb_to_width(image: np.ndarray, width: int) -> np.ndarray:
         return cv2.resize(image, (width, height), interpolation=interpolation)
     except Exception:
         return image
+
+
+@st.cache_data(show_spinner=False)
+def _load_rgb_image(path: str, mtime: float) -> np.ndarray:
+    del mtime
+    try:
+        import cv2  # type: ignore
+
+        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise FileNotFoundError(path)
+        return bgr[..., ::-1]
+    except Exception:
+        from PIL import Image
+
+        return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+
+def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
+    if last_run:
+        path = last_run.get("paths", {}).get("bev_rgb")
+        if path:
+            return str(path)
+    return str(Path(config["export"].get("output_dir", "outputs/track_map")) / "bev_rgb.png")
 
 
 def _auto_metadata_for_cloud(cloud: PointCloud, resolution: float):
@@ -903,8 +928,22 @@ with tabs[7]:
     seg["morphology_open"] = st.slider("Opening radius", 0, 10, int(seg.get("morphology_open", 1)))
     seg["morphology_close"] = st.slider("Closing radius", 0, 15, int(seg.get("morphology_close", 3)))
     last = st.session_state.get("last_run")
-    if last:
-        st.image(last["paths"]["semantic_mask"], use_container_width=True)
+    bev_rgb_path = st.text_input("BEV image for live semantic preview", value=_latest_bev_rgb_path(config, last))
+    bev_path = Path(bev_rgb_path)
+    if bev_path.exists():
+        bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+        preview_config = dict(seg)
+        preview_config["unknown_rgb"] = list(config["bev"].get("unknown_rgb", [80, 80, 80]))
+        semantic = segment_bev_rgb(bev_rgb, preview_config)
+        semantic_rgb = colorize_semantic(semantic)
+        unique, counts = np.unique(semantic, return_counts=True)
+        class_counts = {str(int(cls)): int(count) for cls, count in zip(unique, counts)}
+        st.write({"source": str(bev_path), "class_pixel_counts": class_counts})
+        cols = st.columns(2)
+        cols[0].image(bev_rgb, caption="Current BEV source", use_container_width=True)
+        cols[1].image(semantic_rgb, caption="Live semantic preview", use_container_width=True)
+    else:
+        st.warning(f"BEV image not found: {bev_rgb_path}. Run BEV preview or full export first.")
 
 with tabs[8]:
     occ = config["occupancy"]
