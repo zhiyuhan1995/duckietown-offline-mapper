@@ -97,7 +97,6 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     metadata = metadata_from_bounds(x_min, x_max, y_min, y_max, resolution, config.get("export", {}).get("map_frame", "map"))
     unknown_rgb = tuple(int(x) for x in bev_config.get("unknown_rgb", [80, 80, 80]))
     bev_rgb, point_counts = rasterize_point_cloud(cropped_cloud, metadata, unknown_rgb=unknown_rgb)
-    bev_source = "point_cloud_raster"
 
     segmentation_config = dict(config.get("segmentation", {}))
     segmentation_config["unknown_rgb"] = list(unknown_rgb)
@@ -127,14 +126,8 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         "obstacle_inflation_radius": inflation_radius,
         "semantic_classes": {cls.name: int(cls.value) for cls in SemanticClass},
         "bev_generation": {
-            "source": bev_source,
             "unknown_rgb": list(unknown_rgb),
             "observed_cell_count": int(np.count_nonzero(point_counts)),
-        },
-        "gaussian": {
-            "enabled": False,
-            "mode": "standalone_qa_only",
-            "quality_gate": "not_approved_for_semantic_or_occupancy_input",
         },
         "ground_plane": {
             "coefficients": plane_fit.coefficients.tolist(),

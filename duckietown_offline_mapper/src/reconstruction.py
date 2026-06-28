@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-import shutil
 from typing import Any
 
 import numpy as np
@@ -165,7 +164,7 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
     @staticmethod
     def _write_vggt_images(frames: list[Keyframe], output_dir: Path) -> list[Path]:
         cv2 = _require_cv2()
-        _reset_generated_dir(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
         paths: list[Path] = []
         for i, frame in enumerate(frames):
             path = output_dir / f"frame_{i:04d}_{frame.index:06d}.png"
@@ -243,17 +242,20 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
 
     def _fuse_predictions_to_cloud(self, predictions: dict[str, np.ndarray], images: Any, torch: Any) -> PointCloud:
         points_3d = predictions["points_3d"]
-        point_conf = _squeeze_confidence(predictions["point_conf"])
+        point_conf = predictions["point_conf"]
+        if point_conf.ndim == 4 and point_conf.shape[-1] == 1:
+            point_conf = point_conf[..., 0]
+
         colors = _resized_image_colors(images, points_3d.shape[1:3], torch)
-        mask = _vggt_keep_mask(
-            points_3d,
-            point_conf,
-            colors,
-            confidence_threshold=self.confidence_threshold,
-            relax_ground_confidence=self.relax_ground_confidence,
-            ground_confidence_threshold=self.ground_confidence_threshold,
-            sample_stride=self.sample_stride,
-        )
+        finite = np.isfinite(points_3d).all(axis=-1)
+        mask = finite & (point_conf >= self.confidence_threshold)
+        ground_color_mask = _duckietown_ground_color_mask(colors)
+        if self.relax_ground_confidence:
+            mask |= finite & ground_color_mask & (point_conf >= self.ground_confidence_threshold)
+        if self.sample_stride > 1:
+            stride_mask = np.zeros(mask.shape, dtype=bool)
+            stride_mask[:, :: self.sample_stride, :: self.sample_stride] = True
+            mask &= stride_mask
         if not np.any(mask):
             raise RuntimeError(
                 "VGGT produced no points after confidence filtering. "
@@ -304,7 +306,7 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
     ) -> dict[str, Any]:
         try:
             import torch.nn.functional as F  # type: ignore
-            from vggt.utils.helper import create_pixel_coordinate_grid  # type: ignore
+            from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues  # type: ignore
             from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap_wo_track  # type: ignore
         except Exception as exc:
             raise VGGTDependencyError(
@@ -313,46 +315,32 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
             ) from exc
 
         points_3d = predictions["points_3d"]
-        point_conf = _squeeze_confidence(predictions["point_conf"])
+        point_conf = predictions["point_conf"]
+        if point_conf.ndim == 4 and point_conf.shape[-1] == 1:
+            point_conf = point_conf[..., 0]
         num_frames, height, width, _ = points_3d.shape
         points_rgb = F.interpolate(images, size=(height, width), mode="bilinear", align_corners=False)
         points_rgb = (_as_numpy(points_rgb) * 255.0).clip(0, 255).astype(np.uint8).transpose(0, 2, 3, 1)
         points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
-        keep_mask = _vggt_keep_mask(
-            points_3d,
-            point_conf,
-            points_rgb,
-            confidence_threshold=self.confidence_threshold,
-            relax_ground_confidence=self.relax_ground_confidence,
-            ground_confidence_threshold=self.ground_confidence_threshold,
-            sample_stride=1,
-        )
-        selected_mask = _limit_mask(keep_mask, self.max_points, self.seed)
+        conf_mask = randomly_limit_trues(point_conf >= self.confidence_threshold, self.max_points)
         reconstruction = batch_np_matrix_to_pycolmap_wo_track(
-            points_3d[selected_mask],
-            points_xyf[selected_mask],
-            points_rgb[selected_mask],
+            points_3d[conf_mask],
+            points_xyf[conf_mask],
+            points_rgb[conf_mask],
             predictions["extrinsic"],
             predictions["intrinsic"],
             np.array([height, width]),
             shared_camera=False,
             camera_type="PINHOLE",
         )
-        self._assign_colmap_image_names(reconstruction, image_paths)
         sparse_dir = output_dir / "colmap_sparse"
-        _reset_generated_dir(sparse_dir)
+        sparse_dir.mkdir(parents=True, exist_ok=True)
         reconstruction.write(str(sparse_dir))
-        gsplat_scene_dir = self._prepare_gsplat_scene(output_dir, sparse_dir, image_paths)
         return {
             "mode": "direct_vggt_depth",
             "bundle_adjustment": False,
             "sparse_dir": str(sparse_dir),
-            "gsplat_scene_dir": str(gsplat_scene_dir),
             "image_names": [p.name for p in image_paths],
-            "selected_points": int(np.count_nonzero(selected_mask)),
-            "candidate_points": int(np.count_nonzero(keep_mask)),
-            "uses_relaxed_ground_mask": bool(self.relax_ground_confidence),
-            "ground_confidence_threshold": float(self.ground_confidence_threshold),
         }
 
     def _export_colmap_with_ba(
@@ -402,45 +390,17 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
         )
         if reconstruction is None:
             raise RuntimeError("VGGT-SfM bundle adjustment could not build a reconstruction")
-        self._assign_colmap_image_names(reconstruction, image_paths)
         pycolmap.bundle_adjustment(reconstruction, pycolmap.BundleAdjustmentOptions())
         sparse_dir = output_dir / "colmap_sparse_ba"
-        _reset_generated_dir(sparse_dir)
+        sparse_dir.mkdir(parents=True, exist_ok=True)
         reconstruction.write(str(sparse_dir))
-        gsplat_scene_dir = self._prepare_gsplat_scene(output_dir, sparse_dir, image_paths)
         return {
             "mode": "tracked_bundle_adjustment",
             "bundle_adjustment": True,
             "sparse_dir": str(sparse_dir),
-            "gsplat_scene_dir": str(gsplat_scene_dir),
             "valid_track_count": int(np.count_nonzero(valid_track_mask)),
             "image_names": [p.name for p in image_paths],
         }
-
-    @staticmethod
-    def _assign_colmap_image_names(reconstruction: Any, image_paths: list[Path]) -> None:
-        image_ids = sorted(reconstruction.images)
-        if len(image_ids) != len(image_paths):
-            raise RuntimeError(
-                "VGGT COLMAP export produced a different image count than the extracted keyframes: "
-                f"{len(image_ids)} sparse images vs {len(image_paths)} keyframes."
-            )
-        for image_id, image_path in zip(image_ids, image_paths, strict=True):
-            reconstruction.images[image_id].name = image_path.name
-
-    @staticmethod
-    def _prepare_gsplat_scene(output_dir: Path, sparse_dir: Path, image_paths: list[Path]) -> Path:
-        scene_dir = output_dir / "gsplat_scene"
-        images_dir = scene_dir / "images"
-        scene_sparse_dir = scene_dir / "sparse"
-        _reset_generated_dir(images_dir)
-        _reset_generated_dir(scene_sparse_dir)
-        for image_path in image_paths:
-            shutil.copy2(image_path, images_dir / image_path.name)
-        for sparse_file in sorted(sparse_dir.iterdir()):
-            if sparse_file.is_file():
-                shutil.copy2(sparse_file, scene_sparse_dir / sparse_file.name)
-        return scene_dir
 
 
 def backend_from_config(config: dict[str, Any]) -> ReconstructionBackend:
@@ -529,56 +489,12 @@ def _cleanup_cuda(torch: Any, device: str) -> None:
             pass
 
 
-def _reset_generated_dir(path: Path) -> None:
-    if path.exists():
-        shutil.rmtree(path)
-    path.mkdir(parents=True, exist_ok=True)
-
-
 def _resized_image_colors(images: Any, size_hw: tuple[int, int], torch: Any) -> np.ndarray:
     import torch.nn.functional as F  # type: ignore
 
     resized = F.interpolate(images, size=size_hw, mode="bilinear", align_corners=False)
     colors = (_as_numpy(resized) * 255.0).clip(0, 255).astype(np.uint8)
     return colors.transpose(0, 2, 3, 1)
-
-
-def _squeeze_confidence(confidence: np.ndarray) -> np.ndarray:
-    if confidence.ndim == 4 and confidence.shape[-1] == 1:
-        return confidence[..., 0]
-    return confidence
-
-
-def _vggt_keep_mask(
-    points_3d: np.ndarray,
-    point_conf: np.ndarray,
-    colors: np.ndarray,
-    *,
-    confidence_threshold: float,
-    relax_ground_confidence: bool,
-    ground_confidence_threshold: float,
-    sample_stride: int,
-) -> np.ndarray:
-    finite = np.isfinite(points_3d).all(axis=-1) & np.isfinite(point_conf)
-    mask = finite & (point_conf >= confidence_threshold)
-    if relax_ground_confidence:
-        mask |= finite & _duckietown_ground_color_mask(colors) & (point_conf >= ground_confidence_threshold)
-    if sample_stride > 1:
-        stride_mask = np.zeros(mask.shape, dtype=bool)
-        stride_mask[:, ::sample_stride, ::sample_stride] = True
-        mask &= stride_mask
-    return mask
-
-
-def _limit_mask(mask: np.ndarray, max_points: int, seed: int) -> np.ndarray:
-    if not max_points or np.count_nonzero(mask) <= max_points:
-        return mask
-    selected_indices = np.flatnonzero(mask)
-    rng = np.random.default_rng(seed)
-    keep_indices = rng.choice(selected_indices, size=max_points, replace=False)
-    limited = np.zeros(mask.size, dtype=bool)
-    limited[keep_indices] = True
-    return limited.reshape(mask.shape)
 
 
 def _duckietown_ground_color_mask(colors: np.ndarray) -> np.ndarray:
