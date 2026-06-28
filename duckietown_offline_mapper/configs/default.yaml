@@ -46,8 +46,18 @@ roi:
   y_max: 1.0
 
 bev:
-  resolution: 0.02
+  resolution: 0.005
   unknown_rgb: [80, 80, 80]
+
+ground_texture:
+  enabled: true
+  fusion_mode: weighted_mean
+  confidence_scale: null
+  min_weight: 0.00001
+  view_angle_power: 1.5
+  distance_power: 1.0
+  border_margin_px: 4.0
+  inpaint_radius: 3
 
 segmentation:
   road_v_max: 95

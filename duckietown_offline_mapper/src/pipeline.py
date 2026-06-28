@@ -8,7 +8,8 @@ import numpy as np
 from .alignment import estimate_sim2, sim2_to_sim3
 from .bev import metadata_from_bounds, rasterize_point_cloud
 from .export import export_all
-from .io_utils import ensure_dir, load_yaml
+from .ground_texture import render_ground_texture_bev
+from .io_utils import ensure_dir, load_yaml, save_yaml
 from .occupancy import fuse_occupancy, inflate_obstacles, obstacle_grid_from_non_ground
 from .plane import fit_ground_plane, ground_alignment_transform
 from .pointcloud import PointCloud, save_ply, transform_point_cloud
@@ -96,7 +97,65 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     resolution = float(bev_config.get("resolution", 0.02))
     metadata = metadata_from_bounds(x_min, x_max, y_min, y_max, resolution, config.get("export", {}).get("map_frame", "map"))
     unknown_rgb = tuple(int(x) for x in bev_config.get("unknown_rgb", [80, 80, 80]))
-    bev_rgb, point_counts = rasterize_point_cloud(cropped_cloud, metadata, unknown_rgb=unknown_rgb)
+
+    ground_plane_metadata = {
+        "coefficients": plane_fit.coefficients.tolist(),
+        "ground_count": plane_fit.ground_count,
+        "non_ground_count": plane_fit.non_ground_count,
+        "ground_alignment_transform": ground_transform.tolist(),
+    }
+    texture_project_metadata = {
+        "reconstruction_to_map_transform": alignment_metadata,
+        "ground_plane": ground_plane_metadata,
+        "reconstruction": reconstruction.metadata,
+    }
+
+    texture_result = None
+    ground_texture_config = config.get("ground_texture", {})
+    if bool(ground_texture_config.get("enabled", True)):
+        texture_summary_path = output_dir / "ground_texture_input_summary.yaml"
+        save_yaml(
+            {
+                "config": config,
+                "result": {
+                    "metadata": metadata.to_dict(),
+                    "project_metadata": texture_project_metadata,
+                },
+            },
+            texture_summary_path,
+        )
+        texture_result = render_ground_texture_bev(
+            run_summary_path=texture_summary_path,
+            output_dir=output_dir / "ground_texture",
+            resolution=resolution,
+            fusion_mode=str(ground_texture_config.get("fusion_mode", "weighted_mean")),
+            padding=0.0,
+            confidence_scale=ground_texture_config.get("confidence_scale"),
+            min_weight=float(ground_texture_config.get("min_weight", 1e-5)),
+            view_angle_power=float(ground_texture_config.get("view_angle_power", 1.5)),
+            distance_power=float(ground_texture_config.get("distance_power", 1.0)),
+            border_margin_px=float(ground_texture_config.get("border_margin_px", 4.0)),
+            inpaint_radius=int(ground_texture_config.get("inpaint_radius", 3)),
+            unknown_rgb=unknown_rgb,
+        )
+        bev_rgb = texture_result.texture
+        observed_cell_count = int(np.count_nonzero(texture_result.observed_mask))
+        bev_generation_metadata = {
+            "source": "vggt_camera_ground_texture",
+            "fusion_mode": str(ground_texture_config.get("fusion_mode", "weighted_mean")),
+            "unknown_rgb": list(unknown_rgb),
+            "observed_cell_count": observed_cell_count,
+            "observed_fraction": float(texture_result.stats.get("observed_fraction", 0.0)),
+            "mean_observations_on_observed": float(texture_result.stats.get("mean_observations_on_observed", 0.0)),
+            "texture_paths": {k: str(v) for k, v in texture_result.paths.items()},
+        }
+    else:
+        bev_rgb, point_counts = rasterize_point_cloud(cropped_cloud, metadata, unknown_rgb=unknown_rgb)
+        bev_generation_metadata = {
+            "source": "point_cloud_raster",
+            "unknown_rgb": list(unknown_rgb),
+            "observed_cell_count": int(np.count_nonzero(point_counts)),
+        }
 
     segmentation_config = dict(config.get("segmentation", {}))
     segmentation_config["unknown_rgb"] = list(unknown_rgb)
@@ -125,16 +184,8 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         "safety_margin": float(obstacle_config.get("safety_margin", 0.025)),
         "obstacle_inflation_radius": inflation_radius,
         "semantic_classes": {cls.name: int(cls.value) for cls in SemanticClass},
-        "bev_generation": {
-            "unknown_rgb": list(unknown_rgb),
-            "observed_cell_count": int(np.count_nonzero(point_counts)),
-        },
-        "ground_plane": {
-            "coefficients": plane_fit.coefficients.tolist(),
-            "ground_count": plane_fit.ground_count,
-            "non_ground_count": plane_fit.non_ground_count,
-            "ground_alignment_transform": ground_transform.tolist(),
-        },
+        "bev_generation": bev_generation_metadata,
+        "ground_plane": ground_plane_metadata,
         "reconstruction": reconstruction.metadata,
     }
     paths = export_all(
@@ -147,6 +198,8 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         metadata,
         project_metadata,
     )
+    if texture_result is not None:
+        paths.update({f"ground_texture_{k}": v for k, v in texture_result.paths.items()})
     return {
         "paths": {k: str(v) for k, v in paths.items()},
         "metadata": metadata.to_dict(),

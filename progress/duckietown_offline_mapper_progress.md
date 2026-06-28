@@ -419,8 +419,45 @@ Date: 2026-06-28
   - Mean observations per observed pixel: `8.94`
   - Visual check: produces a continuous, readable top-down Duckietown ground texture with road, lane markings, stop lines, and floor context.
 - Fusion comparison:
-  - `best_view` preserves sharper lane boundaries and is the current default.
-  - `weighted_mean` reduces some seams but blurs lane markings and signs, so it is kept as an option rather than the default.
+  - `best_view` preserves sharper lane boundaries in standalone visual inspection.
+  - `weighted_mean` reduces some seams and is now the user-selected default for the main pipeline.
 - Verification:
   - `python -m py_compile duckietown_offline_mapper/src/ground_texture.py duckietown_offline_mapper/tools/render_ground_texture_bev.py duckietown_offline_mapper/app.py`: passed
   - `python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+
+## Ground Texture Pipeline Integration
+
+Date: 2026-06-28
+
+- Goal:
+  - After VGGT-SfM reconstruction and RANSAC ground-plane extraction, use the VGGT camera-guided IPM ground texture as the BEV image source.
+  - Downstream BEV alignment preview, ROI crop, and semantic segmentation should use the continuous texture instead of the old point-cloud raster image.
+  - Non-ground obstacle occupancy still uses the aligned point cloud, because obstacle evidence is 3D height-based.
+- Implementation:
+  - Added `ground_texture` settings to the default config.
+  - Set pipeline default to `ground_texture.enabled: true` and `fusion_mode: weighted_mean`.
+  - In `run_pipeline`, after ground alignment and ROI metadata creation, write a lightweight `ground_texture_input_summary.yaml` and call `render_ground_texture_bev`.
+  - `bev_rgb.png` is now the exported weighted-mean ground texture when ground texture is enabled.
+  - `segment_bev_rgb(...)` now receives this texture image, so semantic masks are generated from the IPM texture.
+  - `map_metadata.yaml` records `bev_generation.source: vggt_camera_ground_texture` and `fusion_mode: weighted_mean`.
+  - The Alignment tab now defaults to a `Ground Texture` preview source with click-to-select source `x/y`; selected source `z` is fixed to `0.0`.
+- Troubleshooting:
+  - Verified that the previous pipeline path rasterized `cropped_cloud` directly with `rasterize_point_cloud(...)`, producing the sparse point-style BEV.
+  - Switched the default path to texture generation while keeping an explicit disabled branch for comparing the old point-cloud raster if needed.
+  - Checked that enlarged texture-click coordinates are mapped by display image bounds back into the same BEV metadata extents, so the display size does not change selected world coordinates.
+- Smoke test on `heracleum`:
+  - Command used GPU 1 with a tiny reconstruction: `CUDA_VISIBLE_DEVICES=1 .conda-vggt/bin/python duckietown_offline_mapper/run_pipeline.py --config duckietown_offline_mapper/configs/default.yaml --output outputs/track_map_ground_texture_smoke --keyframe-interval 240 --max-keyframes 3 --resolution 0.01`
+  - Output: `outputs/track_map_ground_texture_smoke`
+  - `bev_rgb.png` and `ground_texture/ground_texture_bev.png` have the same hash, proving the exported BEV image is the ground texture.
+  - `map_metadata.yaml` reports `bev_generation.source: vggt_camera_ground_texture`.
+  - `map_metadata.yaml` reports `bev_generation.fusion_mode: weighted_mean`.
+  - Smoke observed fraction: `0.7168`; mean observations on observed cells: `2.36`.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/src/pipeline.py duckietown_offline_mapper/src/ground_texture.py duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+- Streamlit:
+  - Service restarted on `heracleum`.
+  - Remote Streamlit PID: `3995669`
+  - Local tunnel is active: `localhost:8501 -> heracleum:127.0.0.1:8501`
+  - Local HTTP check: `200`
+  - Browser URL: `http://127.0.0.1:8501`

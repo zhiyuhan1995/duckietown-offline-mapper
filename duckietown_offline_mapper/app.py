@@ -146,6 +146,67 @@ def _default_ground_texture_output_dir(run_summary_path: str) -> str:
     return "outputs/ground_texture_bev"
 
 
+def _default_ground_texture_image_path(export_dir: str) -> str:
+    candidates = [
+        Path(export_dir) / "ground_texture" / "ground_texture_bev.png",
+        Path(export_dir) / "ground_texture_bev_r002_weighted" / "ground_texture_bev.png",
+        Path(export_dir) / "ground_texture_bev" / "ground_texture_bev.png",
+        Path("outputs/track_map") / "ground_texture" / "ground_texture_bev.png",
+        Path("outputs/track_map") / "ground_texture_bev_r002_weighted" / "ground_texture_bev.png",
+        Path("outputs/track_map") / "ground_texture_bev" / "ground_texture_bev.png",
+    ]
+    existing = [path for path in candidates if path.exists()]
+    if existing:
+        return str(max(existing, key=lambda path: path.stat().st_mtime))
+    return str(candidates[0])
+
+
+def _ground_texture_metadata_path(texture_path: str) -> Path:
+    return Path(texture_path).with_name("ground_texture_metadata.yaml")
+
+
+@st.cache_data(show_spinner=False)
+def _load_rgb_image(path: str) -> np.ndarray:
+    try:
+        import cv2  # type: ignore
+
+        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise FileNotFoundError(path)
+        return bgr[..., ::-1]
+    except Exception:
+        from PIL import Image
+
+        return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+
+def _resize_rgb_to_width(image: np.ndarray, width: int) -> np.ndarray:
+    width = int(width)
+    if width <= 0 or image.shape[1] == width:
+        return image
+    height = max(1, int(round(image.shape[0] * width / image.shape[1])))
+    try:
+        import cv2  # type: ignore
+
+        interpolation = cv2.INTER_AREA if width < image.shape[1] else cv2.INTER_LINEAR
+        return cv2.resize(image, (width, height), interpolation=interpolation)
+    except Exception:
+        return image
+
+
+def _metadata_from_ground_texture_yaml(path: Path):
+    data = load_yaml(path)
+    meta = data.get("metadata", {})
+    return metadata_from_bounds(
+        float(meta["x_min"]),
+        float(meta["x_max"]),
+        float(meta["y_min"]),
+        float(meta["y_max"]),
+        float(meta["resolution"]),
+        str(meta.get("frame_id", "map")),
+    )
+
+
 def _auto_metadata_for_cloud(cloud: PointCloud, resolution: float):
     points = cloud.points
     x_min, x_max = np.percentile(points[:, 0], [0.25, 99.75])
@@ -550,50 +611,81 @@ with tabs[3]:
         st.session_state.alignment_control_points = list(config["alignment"].get("control_points", []))
 
     st.subheader("Planar Control Points")
-    alignment_path = st.text_input(
-        "Ground-aligned source point cloud",
-        value=_default_alignment_source_path(config["export"].get("output_dir", "outputs/track_map")),
+    alignment_preview_source = st.radio(
+        "Alignment preview source",
+        ["Ground Texture", "Point Cloud"],
+        horizontal=True,
+        key="alignment_preview_source",
     )
-    c1, c2, c3, c4 = st.columns(4)
-    alignment_resolution = c1.slider("Alignment bounds resolution", 0.005, 0.050, 0.015, 0.005)
-    alignment_max_points = c2.number_input(
-        "BEV displayed points",
-        min_value=1000,
-        max_value=2_000_000,
-        value=300_000,
-        step=1000,
-    )
-    alignment_point_radius = c3.slider("BEV point radius", 0, 8, 2, 1)
-    alignment_display_width = c4.slider("BEV display width", 800, 2400, 1600, 100)
 
-    alignment_cloud = None
-    alignment_metadata = None
-    if Path(alignment_path).exists():
-        alignment_cloud = _load_cloud_for_viewer(alignment_path)
-        alignment_metadata = _auto_metadata_for_cloud(alignment_cloud, float(alignment_resolution))
-        max_bev_points = min(int(alignment_max_points), alignment_cloud.size)
-        display_rgb = _render_clickable_bev_hd(
-            alignment_cloud,
-            alignment_metadata,
-            max_bev_points,
-            int(alignment_display_width),
-            int(alignment_point_radius),
-            tuple(config["bev"].get("unknown_rgb", [80, 80, 80])),
+    if alignment_preview_source == "Ground Texture":
+        texture_path = st.text_input(
+            "Ground texture image",
+            value=_default_ground_texture_image_path(config["export"].get("output_dir", "outputs/track_map")),
+            key="alignment_ground_texture_path",
         )
-        st.caption(
-            f"Showing {max_bev_points:,} / {alignment_cloud.size:,} source points. "
-            f"HD display {display_rgb.shape[1]} x {display_rgb.shape[0]}."
-        )
-        if streamlit_image_coordinates:
-            click = streamlit_image_coordinates(display_rgb, key="alignment_bev_click")
-            if click:
-                x, y = _bev_display_pixel_to_world(float(click["x"]), float(click["y"]), display_rgb, alignment_metadata)
-                st.session_state.alignment_pending_source = [float(x), float(y), 0.0]
+        texture_display_width = st.slider("Texture display width", 800, 2400, 1600, 100)
+        texture_meta_path = _ground_texture_metadata_path(texture_path)
+        if Path(texture_path).exists() and texture_meta_path.exists():
+            alignment_metadata = _metadata_from_ground_texture_yaml(texture_meta_path)
+            texture_rgb = _load_rgb_image(texture_path)
+            display_rgb = _resize_rgb_to_width(texture_rgb, int(texture_display_width))
+            st.caption(f"Texture display {display_rgb.shape[1]} x {display_rgb.shape[0]}.")
+            if streamlit_image_coordinates:
+                click = streamlit_image_coordinates(display_rgb, key="alignment_texture_click")
+                if click:
+                    x, y = _bev_display_pixel_to_world(float(click["x"]), float(click["y"]), display_rgb, alignment_metadata)
+                    st.session_state.alignment_pending_source = [float(x), float(y), 0.0]
+            else:
+                st.image(display_rgb, caption="Ground texture source plane")
+                st.warning("Install streamlit-image-coordinates to click the BEV image directly.")
         else:
-            st.image(display_rgb, caption="Ground-aligned BEV source plane")
-            st.warning("Install streamlit-image-coordinates to click the BEV image directly.")
+            st.warning(f"Ground texture image or metadata not found: {texture_path}")
     else:
-        st.warning(f"Point cloud file not found: {alignment_path}")
+        alignment_path = st.text_input(
+            "Ground-aligned source point cloud",
+            value=_default_alignment_source_path(config["export"].get("output_dir", "outputs/track_map")),
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        alignment_resolution = c1.slider("Alignment bounds resolution", 0.005, 0.050, 0.015, 0.005)
+        alignment_max_points = c2.number_input(
+            "BEV displayed points",
+            min_value=1000,
+            max_value=2_000_000,
+            value=300_000,
+            step=1000,
+        )
+        alignment_point_radius = c3.slider("BEV point radius", 0, 8, 2, 1)
+        alignment_display_width = c4.slider("BEV display width", 800, 2400, 1600, 100)
+
+        alignment_cloud = None
+        alignment_metadata = None
+        if Path(alignment_path).exists():
+            alignment_cloud = _load_cloud_for_viewer(alignment_path)
+            alignment_metadata = _auto_metadata_for_cloud(alignment_cloud, float(alignment_resolution))
+            max_bev_points = min(int(alignment_max_points), alignment_cloud.size)
+            display_rgb = _render_clickable_bev_hd(
+                alignment_cloud,
+                alignment_metadata,
+                max_bev_points,
+                int(alignment_display_width),
+                int(alignment_point_radius),
+                tuple(config["bev"].get("unknown_rgb", [80, 80, 80])),
+            )
+            st.caption(
+                f"Showing {max_bev_points:,} / {alignment_cloud.size:,} source points. "
+                f"HD display {display_rgb.shape[1]} x {display_rgb.shape[0]}."
+            )
+            if streamlit_image_coordinates:
+                click = streamlit_image_coordinates(display_rgb, key="alignment_bev_click")
+                if click:
+                    x, y = _bev_display_pixel_to_world(float(click["x"]), float(click["y"]), display_rgb, alignment_metadata)
+                    st.session_state.alignment_pending_source = [float(x), float(y), 0.0]
+            else:
+                st.image(display_rgb, caption="Ground-aligned BEV source plane")
+                st.warning("Install streamlit-image-coordinates to click the BEV image directly.")
+        else:
+            st.warning(f"Point cloud file not found: {alignment_path}")
 
     pending_source = st.session_state.get("alignment_pending_source")
     st.subheader("Add Correspondence")
@@ -674,6 +766,12 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("VGGT Camera-Guided Ground Plane Texture")
     st.caption("Inverse-project BEV ground cells into the VGGT camera views and fuse sampled pixels on the fitted z=0 plane.")
+    ground_texture_config = config.setdefault("ground_texture", {})
+    ground_texture_config["enabled"] = st.checkbox(
+        "Use Ground Texture as pipeline BEV source",
+        value=bool(ground_texture_config.get("enabled", True)),
+        help="When enabled, downstream semantic segmentation uses this IPM texture instead of the point-cloud raster.",
+    )
     run_summary_path = st.text_input(
         "Run summary",
         value=_default_run_summary_path(config["export"].get("output_dir", "outputs/track_map")),
@@ -686,19 +784,63 @@ with tabs[6]:
     )
     c1, c2, c3, c4 = st.columns(4)
     texture_resolution = c1.slider("Texture resolution (m/pixel)", 0.002, 0.050, 0.005, 0.001)
-    texture_fusion_mode = c2.selectbox("Fusion mode", ["best_view", "weighted_mean"])
+    fusion_options = ["weighted_mean", "best_view"]
+    current_fusion_mode = str(ground_texture_config.get("fusion_mode", "weighted_mean"))
+    if current_fusion_mode not in fusion_options:
+        current_fusion_mode = "weighted_mean"
+    texture_fusion_mode = c2.selectbox(
+        "Fusion mode",
+        fusion_options,
+        index=fusion_options.index(current_fusion_mode),
+    )
     texture_padding = c3.number_input("Padding (m)", min_value=0.0, value=0.0, step=0.05)
-    texture_inpaint_radius = c4.slider("Small-hole inpaint radius", 0, 12, 3, 1)
+    texture_inpaint_radius = c4.slider(
+        "Small-hole inpaint radius",
+        0,
+        12,
+        int(ground_texture_config.get("inpaint_radius", 3)),
+        1,
+    )
     c1, c2, c3, c4 = st.columns(4)
     texture_confidence_scale = c1.number_input(
         "Confidence scale",
         min_value=0.001,
-        value=float(config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0)),
+        value=float(
+            ground_texture_config.get(
+                "confidence_scale",
+                config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0),
+            )
+            or config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0)
+        ),
         step=0.1,
     )
-    texture_view_angle_power = c2.slider("View-angle power", 0.0, 4.0, 1.5, 0.1)
-    texture_distance_power = c3.slider("Distance power", 0.0, 4.0, 1.0, 0.1)
-    texture_border_margin = c4.slider("Image border margin (px)", 0.0, 32.0, 4.0, 1.0)
+    texture_view_angle_power = c2.slider(
+        "View-angle power",
+        0.0,
+        4.0,
+        float(ground_texture_config.get("view_angle_power", 1.5)),
+        0.1,
+    )
+    texture_distance_power = c3.slider(
+        "Distance power",
+        0.0,
+        4.0,
+        float(ground_texture_config.get("distance_power", 1.0)),
+        0.1,
+    )
+    texture_border_margin = c4.slider(
+        "Image border margin (px)",
+        0.0,
+        32.0,
+        float(ground_texture_config.get("border_margin_px", 4.0)),
+        1.0,
+    )
+    ground_texture_config["fusion_mode"] = str(texture_fusion_mode)
+    ground_texture_config["confidence_scale"] = float(texture_confidence_scale)
+    ground_texture_config["view_angle_power"] = float(texture_view_angle_power)
+    ground_texture_config["distance_power"] = float(texture_distance_power)
+    ground_texture_config["border_margin_px"] = float(texture_border_margin)
+    ground_texture_config["inpaint_radius"] = int(texture_inpaint_radius)
 
     if st.button("Render ground texture BEV"):
         try:
