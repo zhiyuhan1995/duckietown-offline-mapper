@@ -146,38 +146,11 @@ def _default_ground_texture_output_dir(run_summary_path: str) -> str:
     return "outputs/ground_texture_bev"
 
 
-def _default_ground_texture_image_path(export_dir: str) -> str:
-    candidates = [
-        Path(export_dir) / "ground_texture" / "ground_texture_bev.png",
-        Path(export_dir) / "ground_texture_bev_r002_weighted" / "ground_texture_bev.png",
-        Path(export_dir) / "ground_texture_bev" / "ground_texture_bev.png",
-        Path("outputs/track_map") / "ground_texture" / "ground_texture_bev.png",
-        Path("outputs/track_map") / "ground_texture_bev_r002_weighted" / "ground_texture_bev.png",
-        Path("outputs/track_map") / "ground_texture_bev" / "ground_texture_bev.png",
-    ]
-    existing = [path for path in candidates if path.exists()]
-    if existing:
-        return str(max(existing, key=lambda path: path.stat().st_mtime))
-    return str(candidates[0])
-
-
-def _ground_texture_metadata_path(texture_path: str) -> Path:
-    return Path(texture_path).with_name("ground_texture_metadata.yaml")
-
-
-@st.cache_data(show_spinner=False)
-def _load_rgb_image(path: str) -> np.ndarray:
-    try:
-        import cv2  # type: ignore
-
-        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
-        if bgr is None:
-            raise FileNotFoundError(path)
-        return bgr[..., ::-1]
-    except Exception:
-        from PIL import Image
-
-        return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+def _default_alignment_ground_texture_output_dir(run_summary_path: str) -> str:
+    path = Path(run_summary_path)
+    if path.name == "run_summary.yaml":
+        return str(path.parent / "alignment_ground_texture")
+    return "outputs/alignment_ground_texture"
 
 
 def _resize_rgb_to_width(image: np.ndarray, width: int) -> np.ndarray:
@@ -192,19 +165,6 @@ def _resize_rgb_to_width(image: np.ndarray, width: int) -> np.ndarray:
         return cv2.resize(image, (width, height), interpolation=interpolation)
     except Exception:
         return image
-
-
-def _metadata_from_ground_texture_yaml(path: Path):
-    data = load_yaml(path)
-    meta = data.get("metadata", {})
-    return metadata_from_bounds(
-        float(meta["x_min"]),
-        float(meta["x_max"]),
-        float(meta["y_min"]),
-        float(meta["y_max"]),
-        float(meta["resolution"]),
-        str(meta.get("frame_id", "map")),
-    )
 
 
 def _auto_metadata_for_cloud(cloud: PointCloud, resolution: float):
@@ -619,18 +579,72 @@ with tabs[3]:
     )
 
     if alignment_preview_source == "Ground Texture":
-        texture_path = st.text_input(
-            "Ground texture image",
-            value=_default_ground_texture_image_path(config["export"].get("output_dir", "outputs/track_map")),
-            key="alignment_ground_texture_path",
+        ground_texture_config = config.setdefault("ground_texture", {})
+        alignment_run_summary_path = st.text_input(
+            "Run summary for IPM",
+            value=_default_run_summary_path(config["export"].get("output_dir", "outputs/track_map")),
+            key="alignment_ground_texture_run_summary",
         )
-        texture_display_width = st.slider("Texture display width", 800, 2400, 1600, 100)
-        texture_meta_path = _ground_texture_metadata_path(texture_path)
-        if Path(texture_path).exists() and texture_meta_path.exists():
-            alignment_metadata = _metadata_from_ground_texture_yaml(texture_meta_path)
-            texture_rgb = _load_rgb_image(texture_path)
+        c1, c2 = st.columns(2)
+        alignment_texture_resolution = c1.slider(
+            "Alignment IPM resolution (m/pixel)",
+            0.001,
+            0.050,
+            float(ground_texture_config.get("alignment_preview_resolution", 0.001)),
+            0.001,
+        )
+        texture_display_width = c2.slider("Texture display width", 800, 2400, 1600, 100)
+        ground_texture_config["alignment_preview_resolution"] = float(alignment_texture_resolution)
+        alignment_texture_output_dir = _default_alignment_ground_texture_output_dir(alignment_run_summary_path)
+        if Path(alignment_run_summary_path).exists():
+            unknown_rgb = tuple(int(x) for x in config["bev"].get("unknown_rgb", [80, 80, 80]))
+            signature = {
+                "run_summary_path": str(alignment_run_summary_path),
+                "run_summary_mtime": Path(alignment_run_summary_path).stat().st_mtime,
+                "output_dir": str(alignment_texture_output_dir),
+                "resolution": float(alignment_texture_resolution),
+                "fusion_mode": str(ground_texture_config.get("fusion_mode", "weighted_mean")),
+                "confidence_scale": ground_texture_config.get("confidence_scale"),
+                "min_weight": float(ground_texture_config.get("min_weight", 1e-5)),
+                "view_angle_power": float(ground_texture_config.get("view_angle_power", 1.5)),
+                "distance_power": float(ground_texture_config.get("distance_power", 1.0)),
+                "border_margin_px": float(ground_texture_config.get("border_margin_px", 4.0)),
+                "inpaint_radius": int(ground_texture_config.get("inpaint_radius", 3)),
+                "unknown_rgb": unknown_rgb,
+            }
+            force_regenerate = st.button("Regenerate alignment IPM texture")
+            preview_state = st.session_state.get("alignment_ground_texture_preview")
+            if force_regenerate or preview_state is None or preview_state.get("signature") != signature:
+                with st.spinner("Regenerating IPM ground texture for alignment preview..."):
+                    texture_result = render_ground_texture_bev(
+                        run_summary_path=alignment_run_summary_path,
+                        output_dir=alignment_texture_output_dir,
+                        resolution=float(alignment_texture_resolution),
+                        fusion_mode=signature["fusion_mode"],
+                        padding=0.0,
+                        confidence_scale=signature["confidence_scale"],
+                        min_weight=signature["min_weight"],
+                        view_angle_power=signature["view_angle_power"],
+                        distance_power=signature["distance_power"],
+                        border_margin_px=signature["border_margin_px"],
+                        inpaint_radius=signature["inpaint_radius"],
+                        unknown_rgb=unknown_rgb,
+                    )
+                st.session_state.alignment_ground_texture_preview = {
+                    "signature": signature,
+                    "texture": texture_result.texture,
+                    "metadata": texture_result.metadata,
+                    "paths": texture_result.paths,
+                }
+                preview_state = st.session_state.alignment_ground_texture_preview
+
+            alignment_metadata = preview_state["metadata"]
+            texture_rgb = preview_state["texture"]
             display_rgb = _resize_rgb_to_width(texture_rgb, int(texture_display_width))
-            st.caption(f"Texture display {display_rgb.shape[1]} x {display_rgb.shape[0]}.")
+            st.caption(
+                f"Regenerated IPM texture {texture_rgb.shape[1]} x {texture_rgb.shape[0]} "
+                f"from {alignment_run_summary_path}. Output: {preview_state['paths']['texture']}"
+            )
             if streamlit_image_coordinates:
                 click = streamlit_image_coordinates(display_rgb, key="alignment_texture_click")
                 if click:
@@ -640,7 +654,7 @@ with tabs[3]:
                 st.image(display_rgb, caption="Ground texture source plane")
                 st.warning("Install streamlit-image-coordinates to click the BEV image directly.")
         else:
-            st.warning(f"Ground texture image or metadata not found: {texture_path}")
+            st.warning(f"Run summary not found: {alignment_run_summary_path}")
     else:
         alignment_path = st.text_input(
             "Ground-aligned source point cloud",

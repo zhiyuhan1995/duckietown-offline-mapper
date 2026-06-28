@@ -461,3 +461,27 @@ Date: 2026-06-28
   - Local tunnel is active: `localhost:8501 -> heracleum:127.0.0.1:8501`
   - Local HTTP check: `200`
   - Browser URL: `http://127.0.0.1:8501`
+
+## Alignment Ground Texture Regeneration Fix
+
+Date: 2026-06-28
+
+- Problem:
+  - The Alignment tab's `Ground Texture` preview was reading a previously exported `ground_texture_bev.png`.
+  - The default path picker chose the newest existing texture image from several output directories.
+  - This made the alignment preview capable of showing a stale fixed image rather than a freshly generated IPM result from the current reconstruction summary.
+- Fix:
+  - Removed the fixed PNG selector from the Alignment tab.
+  - Alignment now takes a `Run summary for IPM` path and calls `render_ground_texture_bev(...)` for that summary.
+  - The displayed image comes directly from the returned texture array, not from `_load_rgb_image(...)`.
+  - The generated files are written under `<run_output>/alignment_ground_texture/` as reproducible artifacts.
+  - A signature made from the run-summary path, run-summary modification time, IPM resolution, fusion mode, and weighting parameters controls regeneration.
+  - If the signature changes, or the user presses `Regenerate alignment IPM texture`, the Alignment preview recomputes IPM.
+  - If the signature is unchanged, the current in-session generated texture is reused so clicking source points does not trigger unnecessary IPM recomputation on every Streamlit rerun.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Direct heracleum IPM check wrote `outputs/track_map_ground_texture_smoke/alignment_ground_texture_test/ground_texture_bev.png` and metadata successfully.
+  - Streamlit restarted on `heracleum`; remote PID: `303087`.
+  - Local HTTP check: `200`.
+  - Browser URL: `http://127.0.0.1:8501`
