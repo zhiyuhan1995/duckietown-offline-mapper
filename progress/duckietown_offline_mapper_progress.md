@@ -506,3 +506,30 @@ Date: 2026-06-28
   - Streamlit restarted on `heracleum`; remote PID: `909437`.
   - Local HTTP check: `200`.
   - Browser URL: `http://127.0.0.1:8501`
+
+## Occupancy Preview Live Update Fix
+
+Date: 2026-06-28
+
+- Problem:
+  - Moving the Occupancy tab sliders did not visibly change the preview image.
+  - Root cause: the tab displayed `last_run["paths"]["final_occupancy_grid"]`, a static PNG exported by the previous pipeline run.
+  - The slider values were written to the in-memory config, but the page did not recompute obstacles, inflation, or occupancy for preview.
+- Fix:
+  - Added live source inputs for `bev_rgb.png`, `aligned_point_cloud.ply`, and `map_metadata.yaml`.
+  - The Occupancy tab now recomputes semantic classes from the current BEV source and current Semantic config.
+  - Raw obstacle cells are recomputed from the aligned point cloud with the current `Non-ground height threshold`.
+  - Obstacles are inflated with the current `robot_radius + safety_margin`.
+  - The final occupancy grid is fused live with the current `unknown_as_occupied` setting.
+  - The page displays raw obstacles, inflated obstacles, live final occupancy, and counts for each stage.
+- Troubleshooting note:
+  - Current `outputs/track_map` aligned point cloud has `z_max` around `0.047 m`.
+  - Therefore thresholds at or above `0.06 m` naturally produce zero height-based obstacle cells.
+  - Useful threshold range for the current reconstruction is roughly `0.01-0.03 m`.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Direct checks on `outputs/track_map` showed raw obstacle cell counts change across `0.01/0.02/0.03 m` thresholds.
+  - Streamlit restarted on `heracleum`; remote PID: `917647`.
+  - Local HTTP check: `200`.
+  - Browser URL: `http://127.0.0.1:8501`

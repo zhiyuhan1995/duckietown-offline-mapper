@@ -11,10 +11,12 @@ import streamlit as st
 import yaml
 
 from src.alignment import estimate_sim2
-from src.bev import metadata_from_bounds
+from src.bev import metadata_from_bounds, world_to_grid
+from src.export import ros_image_from_occupancy
 from src.ground_texture import render_ground_texture_bev
 from src.io_utils import deep_update, load_yaml
 from src.keyframes import extract_keyframes, load_image_folder
+from src.occupancy import fuse_occupancy, inflate_obstacles
 from src.plane import fit_ground_plane
 from src.pointcloud import PointCloud, load_ply
 from src.segmentation import colorize_semantic, segment_bev_rgb
@@ -89,7 +91,8 @@ def _run_pipeline_subprocess(config: dict) -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def _load_cloud_for_viewer(path: str) -> PointCloud:
+def _load_cloud_for_viewer(path: str, mtime: float | None = None) -> PointCloud:
+    del mtime
     return load_ply(path)
 
 
@@ -190,6 +193,40 @@ def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
         if path:
             return str(path)
     return str(Path(config["export"].get("output_dir", "outputs/track_map")) / "bev_rgb.png")
+
+
+def _latest_output_path(config: dict, last_run: dict | None, key: str, filename: str) -> str:
+    if last_run:
+        path = last_run.get("paths", {}).get(key)
+        if path:
+            return str(path)
+    return str(Path(config["export"].get("output_dir", "outputs/track_map")) / filename)
+
+
+def _metadata_from_map_yaml(path: str | Path):
+    meta = load_yaml(path)
+    return metadata_from_bounds(
+        float(meta["x_min"]),
+        float(meta["x_max"]),
+        float(meta["y_min"]),
+        float(meta["y_max"]),
+        float(meta["resolution"]),
+        str(meta.get("frame_id", "map")),
+    )
+
+
+def _obstacle_grid_from_aligned_height(cloud: PointCloud, metadata, height_threshold: float) -> np.ndarray:
+    obstacle = np.zeros((metadata.height, metadata.width), dtype=bool)
+    if cloud.size == 0:
+        return obstacle
+    points = cloud.points
+    mask = points[:, 2] >= float(height_threshold)
+    if not np.any(mask):
+        return obstacle
+    u, v = world_to_grid(points[mask, 0], points[mask, 1], metadata)
+    valid = (u >= 0) & (u < metadata.width) & (v >= 0) & (v < metadata.height)
+    obstacle[v[valid], u[valid]] = True
+    return obstacle
 
 
 def _auto_metadata_for_cloud(cloud: PointCloud, resolution: float):
@@ -954,9 +991,78 @@ with tabs[8]:
     occ["safety_margin"] = st.slider("Safety margin (m)", 0.0, 0.20, float(occ.get("safety_margin", 0.025)), 0.005)
     occ["unknown_as_occupied"] = st.checkbox("Unknown as occupied", value=bool(occ.get("unknown_as_occupied", False)))
     last = st.session_state.get("last_run")
-    if last:
-        st.write(last["stats"])
-        st.image(last["paths"]["final_occupancy_grid"], use_container_width=True)
+    bev_rgb_path = st.text_input(
+        "BEV image for live occupancy semantic source",
+        value=_latest_bev_rgb_path(config, last),
+        key="occupancy_bev_rgb_path",
+    )
+    aligned_cloud_path = st.text_input(
+        "Aligned point cloud for live obstacle preview",
+        value=_latest_output_path(config, last, "aligned_point_cloud", "aligned_point_cloud.ply"),
+        key="occupancy_aligned_cloud_path",
+    )
+    map_metadata_path = st.text_input(
+        "Map metadata for live occupancy preview",
+        value=_latest_output_path(config, last, "map_metadata", "map_metadata.yaml"),
+        key="occupancy_map_metadata_path",
+    )
+    bev_path = Path(bev_rgb_path)
+    cloud_path = Path(aligned_cloud_path)
+    metadata_path = Path(map_metadata_path)
+    missing = [str(path) for path in [bev_path, cloud_path, metadata_path] if not path.exists()]
+    if missing:
+        st.warning(f"Missing live occupancy source files: {missing}. Run BEV preview or full export first.")
+    else:
+        bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+        metadata = _metadata_from_map_yaml(metadata_path)
+        if bev_rgb.shape[:2] != (metadata.height, metadata.width):
+            st.warning(
+                "BEV image size does not match map metadata: "
+                f"image={bev_rgb.shape[1]}x{bev_rgb.shape[0]}, metadata={metadata.width}x{metadata.height}."
+            )
+        else:
+            semantic_config = dict(config["segmentation"])
+            semantic_config["unknown_rgb"] = list(config["bev"].get("unknown_rgb", [80, 80, 80]))
+            semantic = segment_bev_rgb(bev_rgb, semantic_config)
+            cloud = _load_cloud_for_viewer(str(cloud_path), cloud_path.stat().st_mtime)
+            raw_obstacle = _obstacle_grid_from_aligned_height(
+                cloud,
+                metadata,
+                float(occ.get("non_ground_height_threshold", 0.06)),
+            )
+            inflation_radius = float(occ.get("robot_radius", 0.085)) + float(occ.get("safety_margin", 0.025))
+            inflated_obstacle = inflate_obstacles(raw_obstacle, inflation_radius, float(metadata.resolution))
+            occupancy_grid = fuse_occupancy(
+                semantic,
+                inflated_obstacle,
+                unknown_as_occupied=bool(occ.get("unknown_as_occupied", False)),
+            )
+            stats = {
+                "source": {
+                    "bev_rgb": str(bev_path),
+                    "aligned_cloud": str(cloud_path),
+                    "map_metadata": str(metadata_path),
+                },
+                "raw_obstacle_cells": int(np.count_nonzero(raw_obstacle)),
+                "inflated_obstacle_cells": int(np.count_nonzero(inflated_obstacle)),
+                "inflation_radius_m": float(inflation_radius),
+                "free_cells": int(np.count_nonzero(occupancy_grid == 0)),
+                "occupied_cells": int(np.count_nonzero(occupancy_grid == 100)),
+                "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
+            }
+            st.write(stats)
+            cols = st.columns(3)
+            cols[0].image((raw_obstacle.astype(np.uint8) * 255), caption="Raw height obstacles", use_container_width=True)
+            cols[1].image(
+                (inflated_obstacle.astype(np.uint8) * 255),
+                caption="Inflated obstacles",
+                use_container_width=True,
+            )
+            cols[2].image(
+                ros_image_from_occupancy(occupancy_grid),
+                caption="Live final occupancy",
+                use_container_width=True,
+            )
 
 with tabs[9]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))
