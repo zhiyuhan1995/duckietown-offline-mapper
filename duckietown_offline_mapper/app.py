@@ -35,6 +35,11 @@ if "config" not in st.session_state:
 
 config = st.session_state.config
 
+METRIC_PIXELS_PER_METER = 1000
+METRIC_RENDER_LIMIT_PIXELS = 32_000_000
+METRIC_RENDER_VERSION = "world-origin-axes-v1"
+METRIC_RENDER_FILENAME = "metric_aligned_map_world_origin_1000pxpm.png"
+
 
 def _image_rgb_from_bgr(frame):
     return frame[..., ::-1]
@@ -197,6 +202,14 @@ def _save_rgb_image(path: str | Path, image: np.ndarray) -> None:
 
 
 def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
+    metric_render = st.session_state.get("bev_metric_render")
+    if metric_render and metric_render.get("render_version") == METRIC_RENDER_VERSION:
+        path = metric_render.get("path")
+        if path and Path(path).exists():
+            return str(path)
+    metric_path = Path(config["export"].get("output_dir", "outputs/track_map")) / METRIC_RENDER_FILENAME
+    if metric_path.exists():
+        return str(metric_path)
     alignment_texture = st.session_state.get("alignment_ground_texture_preview")
     if alignment_texture:
         path = alignment_texture.get("paths", {}).get("texture")
@@ -207,6 +220,17 @@ def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
         if path:
             return str(path)
     return str(Path(config["export"].get("output_dir", "outputs/track_map")) / "bev_rgb.png")
+
+
+def _is_metric_aligned_bev_path(path: str | Path, config: dict) -> bool:
+    candidate = Path(path)
+    metric_render = st.session_state.get("bev_metric_render")
+    if metric_render and metric_render.get("render_version") == METRIC_RENDER_VERSION:
+        rendered_path = metric_render.get("path")
+        if rendered_path and Path(rendered_path).exists() and candidate.resolve() == Path(rendered_path).resolve():
+            return True
+    default_metric = Path(config["export"].get("output_dir", "outputs/track_map")) / METRIC_RENDER_FILENAME
+    return default_metric.exists() and candidate.resolve() == default_metric.resolve()
 
 
 def _latest_output_path(config: dict, last_run: dict | None, key: str, filename: str) -> str:
@@ -254,7 +278,7 @@ def _world_to_metric_view_pixel(x: float, y: float, metadata, pixels_per_meter: 
 def _render_metric_aligned_map(
     bev_rgb: np.ndarray,
     metadata,
-    pixels_per_meter: int = 1000,
+    pixels_per_meter: int = METRIC_PIXELS_PER_METER,
     unknown_rgb: tuple[int, int, int] = (80, 80, 80),
     draw_axes: bool = True,
 ) -> np.ndarray:
@@ -267,11 +291,10 @@ def _render_metric_aligned_map(
     y_min = float(metadata.y_min)
     y_max = float(metadata.y_max)
     width, height = _metric_view_shape(metadata, ppm)
-    max_metric_pixels = 32_000_000
-    if width * height > max_metric_pixels:
+    if width * height > METRIC_RENDER_LIMIT_PIXELS:
         raise ValueError(
             f"Metric view would be too large: {width} x {height} pixels "
-            f"({width * height / 1_000_000:.2f} MP, limit {max_metric_pixels / 1_000_000:.0f} MP). "
+            f"({width * height / 1_000_000:.2f} MP, limit {METRIC_RENDER_LIMIT_PIXELS / 1_000_000:.0f} MP). "
             "Crop the ROI or use tighter alignment bounds before rendering at 1000 px/m."
         )
 
@@ -337,6 +360,29 @@ def _obstacle_grid_from_aligned_height(cloud: PointCloud, metadata, height_thres
         return obstacle
     u, v = world_to_grid(points[mask, 0], points[mask, 1], metadata)
     valid = (u >= 0) & (u < metadata.width) & (v >= 0) & (v < metadata.height)
+    obstacle[v[valid], u[valid]] = True
+    return obstacle
+
+
+def _obstacle_grid_from_metric_view_height(
+    cloud: PointCloud,
+    metadata,
+    image_shape: tuple[int, int],
+    height_threshold: float,
+    pixels_per_meter: int = METRIC_PIXELS_PER_METER,
+) -> np.ndarray:
+    height, width = int(image_shape[0]), int(image_shape[1])
+    obstacle = np.zeros((height, width), dtype=bool)
+    if cloud.size == 0:
+        return obstacle
+    points = cloud.points
+    mask = points[:, 2] >= float(height_threshold)
+    if not np.any(mask):
+        return obstacle
+    ppm = float(pixels_per_meter)
+    u = (width - 1 - np.floor((points[mask, 0] - float(metadata.x_min)) * ppm)).astype(int)
+    v = (height - 1 - np.floor((points[mask, 1] - float(metadata.y_min)) * ppm)).astype(int)
+    valid = (u >= 0) & (u < width) & (v >= 0) & (v < height)
     obstacle[v[valid], u[valid]] = True
     return obstacle
 
@@ -1034,16 +1080,16 @@ with tabs[5]:
     else:
         try:
             metadata = _metadata_from_map_yaml(metadata_path)
-            expected_width, expected_height = _metric_view_shape(metadata, 1000)
-            origin_u, origin_v = _world_to_metric_view_pixel(0.0, 0.0, metadata, 1000)
+            expected_width, expected_height = _metric_view_shape(metadata, METRIC_PIXELS_PER_METER)
+            origin_u, origin_v = _world_to_metric_view_pixel(0.0, 0.0, metadata, METRIC_PIXELS_PER_METER)
             origin_inside = 0.0 <= origin_u < expected_width and 0.0 <= origin_v < expected_height
-            metric_output_path = Path(config["export"].get("output_dir", "outputs/track_map")) / "metric_aligned_map_world_origin_1000pxpm.png"
+            metric_output_path = Path(config["export"].get("output_dir", "outputs/track_map")) / METRIC_RENDER_FILENAME
             st.write(
                 {
-                    "pixels_per_meter": 1000,
+                    "pixels_per_meter": METRIC_PIXELS_PER_METER,
                     "metric_image_size": [int(expected_width), int(expected_height)],
                     "metric_megapixels": round(float(expected_width * expected_height) / 1_000_000.0, 2),
-                    "metric_render_limit_megapixels": 32,
+                    "metric_render_limit_megapixels": int(METRIC_RENDER_LIMIT_PIXELS / 1_000_000),
                     "world_origin_pixel_xy": [round(float(origin_u), 1), round(float(origin_v), 1)],
                     "world_origin_inside_image": bool(origin_inside),
                     "world_origin_offset_from_lower_right_m": [
@@ -1064,7 +1110,7 @@ with tabs[5]:
                 metric_rgb = _render_metric_aligned_map(
                     bev_rgb,
                     metadata,
-                    pixels_per_meter=1000,
+                    pixels_per_meter=METRIC_PIXELS_PER_METER,
                     unknown_rgb=tuple(config["bev"].get("unknown_rgb", [80, 80, 80])),
                     draw_axes=draw_metric_axes,
                 )
@@ -1076,7 +1122,7 @@ with tabs[5]:
                     "metadata_path": str(metadata_path),
                     "metadata_mtime": float(metadata_path.stat().st_mtime),
                     "draw_axes": bool(draw_metric_axes),
-                    "render_version": "world-origin-axes-v1",
+                    "render_version": METRIC_RENDER_VERSION,
                 }
                 st.success(f"Rendered metric map: {metric_output_path}")
 
@@ -1088,7 +1134,7 @@ with tabs[5]:
                     or float(render_info.get("bev_mtime", -1.0)) != float(bev_path.stat().st_mtime)
                     or float(render_info.get("metadata_mtime", -1.0)) != float(metadata_path.stat().st_mtime)
                     or bool(render_info.get("draw_axes", True)) != bool(draw_metric_axes)
-                    or render_info.get("render_version") != "world-origin-axes-v1"
+                    or render_info.get("render_version") != METRIC_RENDER_VERSION
                 )
                 if stale:
                     st.warning("The displayed metric map was rendered from older inputs. Press Render metric aligned map to refresh it.")
@@ -1119,7 +1165,13 @@ with tabs[6]:
         semantic_rgb = colorize_semantic(semantic)
         unique, counts = np.unique(semantic, return_counts=True)
         class_counts = {str(int(cls)): int(count) for cls, count in zip(unique, counts)}
-        st.write({"source": str(bev_path), "class_pixel_counts": class_counts})
+        st.write(
+            {
+                "source": str(bev_path),
+                "coordinate_convention": "metric_aligned_x_left_y_up" if _is_metric_aligned_bev_path(bev_path, config) else "standard_bev_x_right_y_up",
+                "class_pixel_counts": class_counts,
+            }
+        )
         cols = st.columns(2)
         cols[0].image(bev_rgb, caption="Current BEV source", use_container_width=True)
         cols[1].image(semantic_rgb, caption="Live semantic preview", use_container_width=True)
@@ -1159,23 +1211,42 @@ with tabs[7]:
     else:
         bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
         metadata = _metadata_from_map_yaml(metadata_path)
-        if bev_rgb.shape[:2] != (metadata.height, metadata.width):
+        metric_source = _is_metric_aligned_bev_path(bev_path, config)
+        if metric_source:
+            expected_width, expected_height = _metric_view_shape(metadata, METRIC_PIXELS_PER_METER)
+            expected_shape = (expected_height, expected_width)
+        else:
+            expected_shape = (metadata.height, metadata.width)
+        if bev_rgb.shape[:2] != expected_shape:
             st.warning(
                 "BEV image size does not match map metadata: "
-                f"image={bev_rgb.shape[1]}x{bev_rgb.shape[0]}, metadata={metadata.width}x{metadata.height}."
+                f"image={bev_rgb.shape[1]}x{bev_rgb.shape[0]}, expected={expected_shape[1]}x{expected_shape[0]}."
             )
         else:
             semantic_config = dict(config["segmentation"])
             semantic_config["unknown_rgb"] = list(config["bev"].get("unknown_rgb", [80, 80, 80]))
             semantic = segment_bev_rgb(bev_rgb, semantic_config)
             cloud = _load_cloud_for_viewer(str(cloud_path), cloud_path.stat().st_mtime)
-            raw_obstacle = _obstacle_grid_from_aligned_height(
-                cloud,
-                metadata,
-                float(occ.get("non_ground_height_threshold", 0.06)),
-            )
+            if metric_source:
+                raw_obstacle = _obstacle_grid_from_metric_view_height(
+                    cloud,
+                    metadata,
+                    bev_rgb.shape[:2],
+                    float(occ.get("non_ground_height_threshold", 0.06)),
+                    METRIC_PIXELS_PER_METER,
+                )
+                occupancy_resolution = 1.0 / float(METRIC_PIXELS_PER_METER)
+                coordinate_convention = "metric_aligned_x_left_y_up"
+            else:
+                raw_obstacle = _obstacle_grid_from_aligned_height(
+                    cloud,
+                    metadata,
+                    float(occ.get("non_ground_height_threshold", 0.06)),
+                )
+                occupancy_resolution = float(metadata.resolution)
+                coordinate_convention = "standard_bev_x_right_y_up"
             inflation_radius = float(occ.get("robot_radius", 0.085)) + float(occ.get("safety_margin", 0.025))
-            inflated_obstacle = inflate_obstacles(raw_obstacle, inflation_radius, float(metadata.resolution))
+            inflated_obstacle = inflate_obstacles(raw_obstacle, inflation_radius, occupancy_resolution)
             occupancy_grid = fuse_occupancy(
                 semantic,
                 inflated_obstacle,
@@ -1186,7 +1257,9 @@ with tabs[7]:
                     "bev_rgb": str(bev_path),
                     "aligned_cloud": str(cloud_path),
                     "map_metadata": str(metadata_path),
+                    "coordinate_convention": coordinate_convention,
                 },
+                "occupancy_resolution_m_per_cell": float(occupancy_resolution),
                 "raw_obstacle_cells": int(np.count_nonzero(raw_obstacle)),
                 "inflated_obstacle_cells": int(np.count_nonzero(inflated_obstacle)),
                 "inflation_radius_m": float(inflation_radius),

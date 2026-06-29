@@ -643,3 +643,27 @@ Date: 2026-06-29
   - Local HTTP check: `200`.
   - Remote process check after restart: about `75 MB` RSS and low CPU.
   - Browser URL: `http://127.0.0.1:8501`
+
+## Semantic And Occupancy Use Metric Aligned BEV
+
+Date: 2026-06-29
+
+- Request:
+  - Downstream Semantic and Occupancy previews should use the aligned metric BEV image after it is generated.
+- Troubleshooting route:
+  - Semantic can safely switch image sources because it only segments RGB pixels.
+  - Occupancy needed extra care: the metric aligned BEV image uses the display convention `+x` left and `+y` up, while the original `world_to_grid` projection assumes `+x` right.
+  - Therefore replacing only the image source would make height obstacles horizontally inconsistent with the semantic map.
+- Fix:
+  - `_latest_bev_rgb_path(...)` now prefers the generated `metric_aligned_map_world_origin_1000pxpm.png` when available.
+  - Semantic reports whether its source is `metric_aligned_x_left_y_up` or standard BEV.
+  - Occupancy detects metric aligned BEV sources and projects non-ground obstacle points using the same `+x left, +y up` metric-view mapping.
+  - Occupancy inflation uses `1 / 1000 m/cell` for metric aligned BEV sources.
+  - Occupancy stats now report the source coordinate convention and effective occupancy resolution.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2374788`.
+  - Local HTTP check: `200`.
+  - Remote process check after restart: about `75 MB` RSS and low CPU.
+  - Browser URL: `http://127.0.0.1:8501`
