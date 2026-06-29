@@ -26,3 +26,18 @@ def test_inflate_obstacles_radius():
     assert inflated[2, 1]
     assert not inflated[0, 0]
 
+
+def test_inflate_obstacles_empty_grid_fast_path():
+    obstacle = np.zeros((20, 20), dtype=bool)
+    inflated = inflate_obstacles(obstacle, radius_m=0.5, resolution=0.001)
+    assert inflated.shape == obstacle.shape
+    assert not inflated.any()
+
+
+def test_inflate_obstacles_large_radius_distance_path():
+    obstacle = np.zeros((80, 80), dtype=bool)
+    obstacle[40, 40] = True
+    inflated = inflate_obstacles(obstacle, radius_m=0.03, resolution=0.001)
+    assert inflated[40, 40]
+    assert inflated[40, 70]
+    assert not inflated[40, 71]

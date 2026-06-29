@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 from tempfile import NamedTemporaryFile
+import time
 
 import numpy as np
 import streamlit as st
@@ -404,7 +405,7 @@ def _obstacle_grid_from_metric_view_height(
     metadata,
     image_shape: tuple[int, int],
     height_threshold: float,
-    pixels_per_meter: int = METRIC_PIXELS_PER_METER,
+    pixels_per_meter: float = METRIC_PIXELS_PER_METER,
 ) -> np.ndarray:
     height, width = int(image_shape[0]), int(image_shape[1])
     obstacle = np.zeros((height, width), dtype=bool)
@@ -420,6 +421,30 @@ def _obstacle_grid_from_metric_view_height(
     valid = (u >= 0) & (u < width) & (v >= 0) & (v < height)
     obstacle[v[valid], u[valid]] = True
     return obstacle
+
+
+def _resample_bev_rgb_to_resolution(bev_rgb: np.ndarray, metadata, resolution: float) -> tuple[np.ndarray, object]:
+    target_metadata = metadata_from_bounds(
+        float(metadata.x_min),
+        float(metadata.x_max),
+        float(metadata.y_min),
+        float(metadata.y_max),
+        float(resolution),
+        str(metadata.frame_id),
+    )
+    target_size = (int(target_metadata.width), int(target_metadata.height))
+    if bev_rgb.shape[:2] == (target_metadata.height, target_metadata.width):
+        return bev_rgb, target_metadata
+    try:
+        import cv2  # type: ignore
+
+        interpolation = cv2.INTER_AREA if target_size[0] < bev_rgb.shape[1] else cv2.INTER_LINEAR
+        return cv2.resize(bev_rgb, target_size, interpolation=interpolation), target_metadata
+    except Exception:
+        from PIL import Image
+
+        resized = Image.fromarray(np.asarray(bev_rgb, dtype=np.uint8)).resize(target_size, Image.Resampling.BILINEAR)
+        return np.asarray(resized, dtype=np.uint8), target_metadata
 
 
 def _auto_metadata_for_cloud(cloud: PointCloud, resolution: float):
@@ -1045,6 +1070,11 @@ with tabs[3]:
         st.rerun()
 
     st.subheader("Control Correspondences")
+    if st.button("Reset to default correspondences"):
+        st.session_state.alignment_control_points = list(_load_default_config()["alignment"].get("control_points", []))
+        config["alignment"]["control_points"] = list(st.session_state.alignment_control_points)
+        st.session_state.alignment_pending_source = None
+        st.rerun()
     edited_points = []
     for i, point in enumerate(st.session_state.alignment_control_points):
         cols = st.columns([1.2, 1.2, 1.2, 1.2, 0.5])
@@ -1262,6 +1292,15 @@ with tabs[7]:
     occ["non_ground_height_threshold"] = st.slider(
         "Non-ground height threshold (m)", 0.01, 0.30, float(occ.get("non_ground_height_threshold", 0.06)), 0.01
     )
+    occ["preview_resolution"] = st.slider(
+        "Preview resolution (m/cell)",
+        0.001,
+        0.050,
+        float(occ.get("preview_resolution", 0.01)),
+        0.001,
+        format="%.3f",
+    )
+    st.caption("Occupancy preview defaults to 0.01 m/cell for speed. 0.001 m/cell creates ~9M cells and makes obstacle inflation slow.")
     occ["robot_radius"] = st.slider("Robot radius (m)", 0.02, 0.25, float(occ.get("robot_radius", 0.085)), 0.005)
     occ["safety_margin"] = st.slider("Safety margin (m)", 0.0, 0.20, float(occ.get("safety_margin", 0.025)), 0.005)
     occ["unknown_as_occupied"] = st.checkbox("Unknown as occupied", value=bool(occ.get("unknown_as_occupied", False)))
@@ -1302,6 +1341,7 @@ with tabs[7]:
             "semantic": semantic_config,
             "occupancy": {
                 "non_ground_height_threshold": float(occ.get("non_ground_height_threshold", 0.06)),
+                "preview_resolution": float(occ.get("preview_resolution", 0.01)),
                 "robot_radius": float(occ.get("robot_radius", 0.085)),
                 "safety_margin": float(occ.get("safety_margin", 0.025)),
                 "unknown_as_occupied": bool(occ.get("unknown_as_occupied", False)),
@@ -1313,49 +1353,81 @@ with tabs[7]:
             expected_shape = (expected_height, expected_width)
         else:
             expected_shape = (metadata.height, metadata.width)
+        preview_metadata = metadata_from_bounds(
+            float(metadata.x_min),
+            float(metadata.x_max),
+            float(metadata.y_min),
+            float(metadata.y_max),
+            float(occ.get("preview_resolution", 0.01)),
+            str(metadata.frame_id),
+        )
         st.write(
             {
-                "expected_image_size": [int(expected_shape[1]), int(expected_shape[0])],
+                "source_image_size": [int(expected_shape[1]), int(expected_shape[0])],
+                "preview_compute_size": [int(preview_metadata.width), int(preview_metadata.height)],
                 "coordinate_convention": "metric_aligned_x_left_y_up" if metric_source else "standard_bev_x_right_y_up",
             }
         )
         if st.button("Run occupancy preview", key="run_occupancy_preview"):
             with st.spinner("Computing occupancy preview..."):
+                timings: dict[str, float] = {}
+                step_t = time.perf_counter()
                 bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+                timings["load_bev_s"] = round(time.perf_counter() - step_t, 4)
                 if bev_rgb.shape[:2] != expected_shape:
                     st.warning(
                         "BEV image size does not match map metadata: "
                         f"image={bev_rgb.shape[1]}x{bev_rgb.shape[0]}, expected={expected_shape[1]}x{expected_shape[0]}."
                     )
                 else:
+                    preview_resolution = float(occ.get("preview_resolution", 0.01))
+                    step_t = time.perf_counter()
+                    bev_rgb, preview_metadata = _resample_bev_rgb_to_resolution(bev_rgb, metadata, preview_resolution)
+                    timings["resample_bev_s"] = round(time.perf_counter() - step_t, 4)
+                    step_t = time.perf_counter()
                     semantic = segment_bev_rgb(bev_rgb, semantic_config)
+                    timings["semantic_s"] = round(time.perf_counter() - step_t, 4)
+                    step_t = time.perf_counter()
                     cloud = _load_cloud_for_viewer(str(cloud_path), cloud_path.stat().st_mtime)
+                    timings["load_cloud_s"] = round(time.perf_counter() - step_t, 4)
+                    step_t = time.perf_counter()
                     if metric_source:
                         raw_obstacle = _obstacle_grid_from_metric_view_height(
                             cloud,
                             metadata,
                             bev_rgb.shape[:2],
                             float(occ.get("non_ground_height_threshold", 0.06)),
-                            METRIC_PIXELS_PER_METER,
+                            1.0 / preview_resolution,
                         )
-                        occupancy_resolution = 1.0 / float(METRIC_PIXELS_PER_METER)
+                        occupancy_resolution = preview_resolution
                         coordinate_convention = "metric_aligned_x_left_y_up"
                     else:
                         raw_obstacle = _obstacle_grid_from_aligned_height(
                             cloud,
-                            metadata,
+                            preview_metadata,
                             float(occ.get("non_ground_height_threshold", 0.06)),
                         )
-                        occupancy_resolution = float(metadata.resolution)
+                        occupancy_resolution = float(preview_metadata.resolution)
                         coordinate_convention = "standard_bev_x_right_y_up"
+                    timings["obstacle_projection_s"] = round(time.perf_counter() - step_t, 4)
                     inflation_radius = float(occ.get("robot_radius", 0.085)) + float(occ.get("safety_margin", 0.025))
+                    step_t = time.perf_counter()
                     inflated_obstacle = inflate_obstacles(raw_obstacle, inflation_radius, occupancy_resolution)
+                    timings["inflate_obstacles_s"] = round(time.perf_counter() - step_t, 4)
+                    step_t = time.perf_counter()
                     occupancy_grid = fuse_occupancy(
                         semantic,
                         inflated_obstacle,
                         unknown_as_occupied=bool(occ.get("unknown_as_occupied", False)),
                     )
+                    timings["fuse_occupancy_s"] = round(time.perf_counter() - step_t, 4)
                     display_width = min(PREVIEW_DISPLAY_WIDTH, int(bev_rgb.shape[1]))
+                    step_t = time.perf_counter()
+                    raw_obstacle_preview = _resize_rgb_to_width(raw_obstacle.astype(np.uint8) * 255, display_width)
+                    inflated_obstacle_preview = _resize_rgb_to_width(inflated_obstacle.astype(np.uint8) * 255, display_width)
+                    final_occupancy_preview = _resize_rgb_to_width(ros_image_from_occupancy(occupancy_grid), display_width)
+                    timings["preview_images_s"] = round(time.perf_counter() - step_t, 4)
+                    timings["total_s"] = round(sum(timings.values()), 4)
                     st.session_state.occupancy_preview = {
                         "signature": occupancy_signature,
                         "stats": {
@@ -1368,6 +1440,7 @@ with tabs[7]:
                             "computed_image_size": [int(bev_rgb.shape[1]), int(bev_rgb.shape[0])],
                             "display_width_px": display_width,
                             "occupancy_resolution_m_per_cell": float(occupancy_resolution),
+                            "timings_s": timings,
                             "raw_obstacle_cells": int(np.count_nonzero(raw_obstacle)),
                             "inflated_obstacle_cells": int(np.count_nonzero(inflated_obstacle)),
                             "inflation_radius_m": float(inflation_radius),
@@ -1375,9 +1448,9 @@ with tabs[7]:
                             "occupied_cells": int(np.count_nonzero(occupancy_grid == 100)),
                             "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
                         },
-                        "raw_obstacle_rgb": _resize_rgb_to_width(raw_obstacle.astype(np.uint8) * 255, display_width),
-                        "inflated_obstacle_rgb": _resize_rgb_to_width(inflated_obstacle.astype(np.uint8) * 255, display_width),
-                        "final_occupancy_rgb": _resize_rgb_to_width(ros_image_from_occupancy(occupancy_grid), display_width),
+                        "raw_obstacle_rgb": raw_obstacle_preview,
+                        "inflated_obstacle_rgb": inflated_obstacle_preview,
+                        "final_occupancy_rgb": final_occupancy_preview,
                     }
 
         occupancy_preview = st.session_state.get("occupancy_preview")

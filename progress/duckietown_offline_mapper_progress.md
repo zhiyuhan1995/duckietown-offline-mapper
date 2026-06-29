@@ -748,3 +748,33 @@ Date: 2026-06-29
   - Local HTTP check: `200`.
   - Remote process check after restart: about `75 MB` RSS and low CPU.
   - Browser URL: `http://127.0.0.1:8501`
+
+## Default Alignment Points And Occupancy Preview Speed
+
+Date: 2026-06-29
+
+- Request:
+  - Make the three manually entered alignment correspondences the default control points.
+  - Investigate why the Occupancy page can compute a preview but feels very slow.
+- Default control points:
+  - `source=(-0.02, 0.02, 0)` -> `target=(0.0, 0.0, 0)`
+  - `source=(2.03, -0.01, 0)` -> `target=(2.0, 0.0, 0)`
+  - `source=(0.01, 2.39, 0)` -> `target=(0.0, 2.4, 0)`
+- Troubleshooting route:
+  - The active Alignment IPM texture metadata is `resolution=0.001`, `width=3079`, `height=2925`, so Occupancy was operating on about `9,006,075` grid cells.
+  - With `robot_radius=0.085 m` and `safety_margin=0.025 m`, the inflation radius is `0.11 m`.
+  - At `0.001 m/cell`, that becomes a `110 px` radius, meaning the old dilation used a roughly `221 x 221` circular kernel across about 9M cells.
+  - In the observed run `raw_obstacle_cells=0`, but the old implementation still built and ran the dilation path.
+  - A standalone timing split showed the default preview path is now dominated by first-time PLY loading, not obstacle inflation.
+- Fix:
+  - Added the three correspondences to `configs/default.yaml`.
+  - Added an Alignment page button to reset the current session back to the configured default correspondences.
+  - Added an Occupancy `Preview resolution (m/cell)` control, defaulting to `0.01`.
+  - Occupancy preview now resamples the BEV source to the preview resolution before semantic segmentation and occupancy fusion.
+  - Added timing breakdowns to Occupancy preview stats under `timings_s`.
+  - Optimized obstacle inflation with an empty-grid fast path and a distance-transform path for large radii.
+- Verification:
+  - Standalone benchmark on `outputs/track_map/alignment_ground_texture/ground_texture_bev.png`:
+    - `0.01 m/cell`: `308 x 293`, about `90k` cells, total about `2.26s`; first-time PLY load about `2.05s`.
+    - `0.001 m/cell`: `3079 x 2925`, about `9.0M` cells, total about `0.55s` after cache with optimized inflation; old dilation was the problematic path.
+  - Empty `2925 x 3079` obstacle-grid inflation returns in about `0.004s`.

@@ -29,12 +29,15 @@ def obstacle_grid_from_non_ground(
 
 
 def inflate_obstacles(obstacle_grid: np.ndarray, radius_m: float, resolution: float) -> np.ndarray:
+    obstacle = obstacle_grid.astype(bool)
     radius_px = int(np.ceil(radius_m / resolution))
-    if radius_px <= 0:
-        return obstacle_grid.astype(bool)
+    if radius_px <= 0 or not np.any(obstacle):
+        return obstacle
+    if radius_px > 24:
+        return ndimage.distance_transform_edt(~obstacle) <= radius_px
     y, x = np.ogrid[-radius_px : radius_px + 1, -radius_px : radius_px + 1]
     struct = (x * x + y * y) <= radius_px * radius_px
-    return ndimage.binary_dilation(obstacle_grid.astype(bool), structure=struct)
+    return ndimage.binary_dilation(obstacle, structure=struct)
 
 
 def fuse_occupancy(
@@ -57,4 +60,3 @@ def fuse_occupancy(
     if unknown_as_occupied:
         occupancy[semantic == SemanticClass.UNKNOWN] = 100
     return occupancy
-

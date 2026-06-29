@@ -33,7 +33,13 @@ ground_plane:
 
 alignment:
   mode: sim2
-  control_points: []
+  control_points:
+    - source: [-0.02, 0.02, 0.0]
+      target: [0.0, 0.0, 0.0]
+    - source: [2.03, -0.01, 0.0]
+      target: [2.0, 0.0, 0.0]
+    - source: [0.01, 2.39, 0.0]
+      target: [0.0, 2.4, 0.0]
 
 roi:
   auto: true
@@ -77,6 +83,7 @@ segmentation:
 
 occupancy:
   non_ground_height_threshold: 0.06
+  preview_resolution: 0.01
   robot_radius: 0.085
   safety_margin: 0.025
   unknown_as_occupied: false
