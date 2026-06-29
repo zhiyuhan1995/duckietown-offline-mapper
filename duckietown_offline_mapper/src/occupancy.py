@@ -57,6 +57,24 @@ def gradient_margin_from_occupancy(
     return margin.astype(np.float32)
 
 
+def remove_isolated_occupied_cells(
+    occupancy_grid: np.ndarray,
+    fill_value: int = 0,
+) -> tuple[np.ndarray, int]:
+    cleaned = np.asarray(occupancy_grid, dtype=np.int8).copy()
+    occupied = cleaned == 100
+    if not np.any(occupied):
+        return cleaned, 0
+
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    neighbor_count = ndimage.convolve(occupied.astype(np.uint8), kernel, mode="constant", cval=0)
+    neighbor_count = neighbor_count - occupied.astype(np.uint8)
+    remove_mask = occupied & (neighbor_count == 0)
+    removed_cells = int(np.count_nonzero(remove_mask))
+    cleaned[remove_mask] = int(fill_value)
+    return cleaned, removed_cells
+
+
 def fuse_occupancy(
     semantic_grid: np.ndarray,
     obstacle_grid: np.ndarray,

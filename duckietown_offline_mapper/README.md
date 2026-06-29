@@ -55,7 +55,7 @@ BA uses the VGGT/VGGSfM tracker, LightGlue dependencies, and pycolmap. It is slo
 ## Run UI
 
 ```bash
-ssh -L 8501:localhost:8501 pulsatilla
+ssh -L 8501:localhost:8501 myristica
 cd /home/hanzhiyu/projects/duckietown
 CUDA_VISIBLE_DEVICES=0 .conda-vggt/bin/python -m streamlit run duckietown_offline_mapper/app.py \
   --server.port 8501
@@ -100,6 +100,8 @@ Occupancy conventions:
 - `map.yaml` / `map.png`: default ROS map with gradient margin, using `mode: scale`
 - `map_hard.yaml` / `map_hard.png`: hard trinary occupancy map, free `254`, occupied `0`, unknown `205`
 - `map_with_margin.yaml` / `map_with_margin.png`: explicit copy of the default gradient-margin map
+
+`occupancy.remove_isolated_occupied` is enabled by default. It removes only single occupied cells whose 8-neighborhood contains no other occupied cell before the gradient margin is generated, which prevents salt noise from creating a full cost halo.
 
 ## Coordinate Flow
 

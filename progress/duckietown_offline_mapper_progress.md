@@ -870,3 +870,29 @@ Date: 2026-06-29
   - `map.yaml` now has `mode: scale`.
   - `map.png` has 186 unique grayscale values; `map_hard.png` has only 2 values.
   - `occupancy_margin.npy` has shape `(585, 616)`, dtype `float32`, min `0.0`, max `1.0`.
+
+## Isolated Occupied Salt Noise Filter
+
+Date: 2026-06-29
+
+- Problem:
+  - A single pepper/salt occupied pixel with no nearby occupied structure created a full gradient margin halo around itself.
+  - This was visible in the World Map margin preview as isolated dots producing artificial local cost blobs.
+- Troubleshooting route:
+  - The first interpretation, removing small occupied connected components, was too broad because it could erase small but real map structure.
+  - The clarified rule is narrower: only an occupied cell with no other occupied cell in its 8-neighborhood should be treated as noise.
+- Fix:
+  - Added `occupancy.remove_isolated_occupied`, enabled by default.
+  - Added `remove_isolated_occupied_cells(...)`, which scans occupied cells with an 8-neighborhood convolution and replaces only zero-neighbor occupied cells with free cells.
+  - Applied this cleanup before gradient-margin generation in:
+    - full pipeline export
+    - Occupancy preview
+    - World Map margin preview
+    - Export controls
+  - Added UI checkboxes to enable/disable the cleanup where the margin is previewed or exported.
+  - README now documents the exact behavior.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/pipeline.py duckietown_offline_mapper/src/occupancy.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
+  - Full export on `myristica` GPU 0 finished successfully.
+  - Current export stats included `isolated_occupied_removed_cells: 6`.

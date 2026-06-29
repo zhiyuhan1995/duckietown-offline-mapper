@@ -1,6 +1,11 @@
 import numpy as np
 
-from duckietown_offline_mapper.src.occupancy import fuse_occupancy, gradient_margin_from_occupancy, inflate_obstacles
+from duckietown_offline_mapper.src.occupancy import (
+    fuse_occupancy,
+    gradient_margin_from_occupancy,
+    inflate_obstacles,
+    remove_isolated_occupied_cells,
+)
 from duckietown_offline_mapper.src.segmentation import SemanticClass
 
 
@@ -55,3 +60,22 @@ def test_gradient_margin_from_occupancy_no_occupied_cells():
     margin = gradient_margin_from_occupancy(occupancy, margin_m=2.0, resolution=0.5)
     assert margin.shape == occupancy.shape
     assert not margin.any()
+
+
+def test_remove_isolated_occupied_cells_removes_salt_noise():
+    occupancy = np.zeros((5, 6), dtype=np.int8)
+    occupancy[1, 1] = 100
+    occupancy[3, 1:5] = 100
+    cleaned, removed_cells = remove_isolated_occupied_cells(occupancy)
+    assert cleaned[1, 1] == 0
+    assert np.all(cleaned[3, 1:5] == 100)
+    assert removed_cells == 1
+
+
+def test_remove_isolated_occupied_cells_uses_eight_connectivity():
+    occupancy = np.zeros((4, 4), dtype=np.int8)
+    occupancy[1, 1] = 100
+    occupancy[2, 2] = 100
+    cleaned, removed_cells = remove_isolated_occupied_cells(occupancy)
+    assert np.count_nonzero(cleaned == 100) == 2
+    assert removed_cells == 0

@@ -10,7 +10,7 @@ from .bev import metadata_from_bounds, rasterize_point_cloud
 from .export import export_all
 from .ground_texture import render_ground_texture_bev
 from .io_utils import ensure_dir, load_yaml, save_yaml
-from .occupancy import fuse_occupancy, inflate_obstacles, obstacle_grid_from_non_ground
+from .occupancy import fuse_occupancy, inflate_obstacles, obstacle_grid_from_non_ground, remove_isolated_occupied_cells
 from .plane import fit_ground_plane, ground_alignment_transform
 from .pointcloud import PointCloud, save_ply, transform_point_cloud
 from .reconstruction import backend_from_config
@@ -174,6 +174,9 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         inflated_obstacle,
         unknown_as_occupied=bool(obstacle_config.get("unknown_as_occupied", False)),
     )
+    isolated_removed_cells = 0
+    if bool(obstacle_config.get("remove_isolated_occupied", True)):
+        occupancy_grid, isolated_removed_cells = remove_isolated_occupied_cells(occupancy_grid)
     gradient_margin_m = float(obstacle_config.get("gradient_margin_m", 0.0))
 
     project_metadata = {
@@ -185,6 +188,8 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         "safety_margin": float(obstacle_config.get("safety_margin", 0.025)),
         "obstacle_inflation_radius": inflation_radius,
         "gradient_margin_m": gradient_margin_m,
+        "remove_isolated_occupied": bool(obstacle_config.get("remove_isolated_occupied", True)),
+        "isolated_occupied_removed_cells": isolated_removed_cells,
         "semantic_classes": {cls.name: int(cls.value) for cls in SemanticClass},
         "bev_generation": bev_generation_metadata,
         "ground_plane": ground_plane_metadata,
@@ -214,5 +219,6 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             "occupied_cells": int(np.count_nonzero(occupancy_grid == 100)),
             "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
             "gradient_margin_m": gradient_margin_m,
+            "isolated_occupied_removed_cells": isolated_removed_cells,
         },
     }

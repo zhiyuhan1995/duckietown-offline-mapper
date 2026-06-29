@@ -17,7 +17,7 @@ from src.export import ros_image_from_occupancy, ros_image_from_occupancy_margin
 from src.ground_texture import render_ground_texture_bev
 from src.io_utils import deep_update, load_yaml
 from src.keyframes import extract_keyframes, load_image_folder
-from src.occupancy import fuse_occupancy, gradient_margin_from_occupancy, inflate_obstacles
+from src.occupancy import fuse_occupancy, gradient_margin_from_occupancy, inflate_obstacles, remove_isolated_occupied_cells
 from src.plane import fit_ground_plane
 from src.pointcloud import PointCloud, load_ply
 from src.segmentation import SemanticClass, colorize_semantic, segment_bev_rgb
@@ -1529,6 +1529,11 @@ with tabs[7]:
         float(occ.get("gradient_margin_m", 0.15)),
         0.01,
     )
+    occ["remove_isolated_occupied"] = st.checkbox(
+        "Remove isolated occupied cells",
+        value=bool(occ.get("remove_isolated_occupied", True)),
+        help="Remove only single occupied cells whose 8-neighborhood contains no other occupied cell.",
+    )
     occ["unknown_as_occupied"] = st.checkbox("Unknown as occupied", value=bool(occ.get("unknown_as_occupied", False)))
     last = st.session_state.get("last_run")
     bev_rgb_path = st.text_input(
@@ -1571,6 +1576,7 @@ with tabs[7]:
                 "robot_radius": float(occ.get("robot_radius", 0.085)),
                 "safety_margin": float(occ.get("safety_margin", 0.025)),
                 "gradient_margin_m": float(occ.get("gradient_margin_m", 0.15)),
+                "remove_isolated_occupied": bool(occ.get("remove_isolated_occupied", True)),
                 "unknown_as_occupied": bool(occ.get("unknown_as_occupied", False)),
             },
             "metric_source": bool(metric_source),
@@ -1649,6 +1655,11 @@ with tabs[7]:
                     )
                     timings["fuse_occupancy_s"] = round(time.perf_counter() - step_t, 4)
                     step_t = time.perf_counter()
+                    isolated_removed_cells = 0
+                    if bool(occ.get("remove_isolated_occupied", True)):
+                        occupancy_grid, isolated_removed_cells = remove_isolated_occupied_cells(occupancy_grid)
+                    timings["remove_isolated_occupied_s"] = round(time.perf_counter() - step_t, 4)
+                    step_t = time.perf_counter()
                     gradient_margin_m = float(occ.get("gradient_margin_m", 0.15))
                     margin_layer = gradient_margin_from_occupancy(occupancy_grid, gradient_margin_m, occupancy_resolution)
                     timings["gradient_margin_s"] = round(time.perf_counter() - step_t, 4)
@@ -1676,6 +1687,8 @@ with tabs[7]:
                             "raw_obstacle_cells": int(np.count_nonzero(raw_obstacle)),
                             "inflated_obstacle_cells": int(np.count_nonzero(inflated_obstacle)),
                             "inflation_radius_m": float(inflation_radius),
+                            "remove_isolated_occupied": bool(occ.get("remove_isolated_occupied", True)),
+                            "isolated_occupied_removed_cells": int(isolated_removed_cells),
                             "gradient_margin_m": float(gradient_margin_m),
                             "gradient_margin_nonzero_cells": int(np.count_nonzero(margin_layer > 0.0)),
                             "free_cells": int(np.count_nonzero(occupancy_grid == 0)),
@@ -1738,6 +1751,12 @@ with tabs[8]:
         key="world_gradient_margin_m",
     )
     show_margin_preview = c2.checkbox("Preview gradient margin from occupancy grid", value=True)
+    config["occupancy"]["remove_isolated_occupied"] = st.checkbox(
+        "Remove isolated occupied cells before margin",
+        value=bool(config["occupancy"].get("remove_isolated_occupied", True)),
+        key="world_remove_isolated_occupied",
+        help="Remove only single occupied cells whose 8-neighborhood contains no other occupied cell.",
+    )
     show_world_control = st.checkbox("Show alignment target control points", value=True)
 
     map_yaml = Path(map_yaml_path)
@@ -1753,6 +1772,9 @@ with tabs[8]:
                     occupancy_grid = _load_numpy_array(str(occupancy_grid_path_obj), occupancy_grid_path_obj.stat().st_mtime)
                     expected_shape = (int(map_info["size"][1]), int(map_info["size"][0]))
                     if occupancy_grid.shape[:2] == expected_shape:
+                        isolated_removed_cells = 0
+                        if bool(config["occupancy"].get("remove_isolated_occupied", True)):
+                            occupancy_grid, isolated_removed_cells = remove_isolated_occupied_cells(occupancy_grid)
                         margin_layer = gradient_margin_from_occupancy(
                             occupancy_grid,
                             float(config["occupancy"].get("gradient_margin_m", 0.15)),
@@ -1766,6 +1788,8 @@ with tabs[8]:
                         map_info["image_path"] = f"{occupancy_grid_path_obj} + gradient margin preview"
                         margin_preview_stats = {
                             "margin_radius_m": float(config["occupancy"].get("gradient_margin_m", 0.15)),
+                            "remove_isolated_occupied": bool(config["occupancy"].get("remove_isolated_occupied", True)),
+                            "isolated_occupied_removed_cells": int(isolated_removed_cells),
                             "margin_nonzero_cells": int(np.count_nonzero(margin_layer > 0.0)),
                             "margin_max": float(np.max(margin_layer)) if margin_layer.size else 0.0,
                             "value_convention": "1 at occupied cells, linearly falling to 0 at margin radius",
@@ -1833,6 +1857,12 @@ with tabs[9]:
         float(config["occupancy"].get("gradient_margin_m", 0.15)),
         0.01,
         key="export_gradient_margin_m",
+    )
+    config["occupancy"]["remove_isolated_occupied"] = st.checkbox(
+        "Remove isolated occupied cells before export",
+        value=bool(config["occupancy"].get("remove_isolated_occupied", True)),
+        key="export_remove_isolated_occupied",
+        help="Remove only single occupied cells whose 8-neighborhood contains no other occupied cell.",
     )
     st.caption("Full export writes map.yaml/map.png with this gradient margin, plus map_hard.yaml/map_hard.png for the hard occupancy map.")
     config_file = st.file_uploader("Optional YAML override", type=["yaml", "yml"])
