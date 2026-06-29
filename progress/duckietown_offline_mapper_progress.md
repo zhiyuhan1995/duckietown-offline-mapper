@@ -533,3 +533,23 @@ Date: 2026-06-28
   - Streamlit restarted on `heracleum`; remote PID: `917647`.
   - Local HTTP check: `200`.
   - Browser URL: `http://127.0.0.1:8501`
+
+## Remove Redundant Ground Texture Tab
+
+Date: 2026-06-29
+
+- Problem:
+  - The standalone `Ground Texture` tab duplicated the IPM texture generation already needed in the Alignment step.
+  - This made the UI look like the pipeline had to rebuild the same BEV texture later as a separate stage.
+- Fix:
+  - Removed the standalone `Ground Texture` tab from the top navigation.
+  - Moved the IPM texture controls into the Alignment tab under `IPM texture settings`.
+  - Alignment remains the canonical place where the VGGT camera-guided ground texture is generated for point picking.
+  - The Alignment-generated texture and metadata are now preferred by Semantic and Occupancy live previews when present.
+  - The full export config still keeps `ground_texture.enabled`, but the user-facing control now lives in Alignment instead of a separate page.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2171997`.
+  - Local HTTP check: `200`.
+  - Browser URL: `http://127.0.0.1:8501`

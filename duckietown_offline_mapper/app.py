@@ -143,13 +143,6 @@ def _default_run_summary_path(export_dir: str) -> str:
     return str(candidates[0])
 
 
-def _default_ground_texture_output_dir(run_summary_path: str) -> str:
-    path = Path(run_summary_path)
-    if path.name == "run_summary.yaml":
-        return str(path.parent / "ground_texture_bev")
-    return "outputs/ground_texture_bev"
-
-
 def _default_alignment_ground_texture_output_dir(run_summary_path: str) -> str:
     path = Path(run_summary_path)
     if path.name == "run_summary.yaml":
@@ -188,6 +181,11 @@ def _load_rgb_image(path: str, mtime: float) -> np.ndarray:
 
 
 def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
+    alignment_texture = st.session_state.get("alignment_ground_texture_preview")
+    if alignment_texture:
+        path = alignment_texture.get("paths", {}).get("texture")
+        if path and Path(path).exists():
+            return str(path)
     if last_run:
         path = last_run.get("paths", {}).get("bev_rgb")
         if path:
@@ -196,6 +194,12 @@ def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
 
 
 def _latest_output_path(config: dict, last_run: dict | None, key: str, filename: str) -> str:
+    if key == "map_metadata":
+        alignment_texture = st.session_state.get("alignment_ground_texture_preview")
+        if alignment_texture:
+            path = alignment_texture.get("paths", {}).get("metadata")
+            if path and Path(path).exists():
+                return str(path)
     if last_run:
         path = last_run.get("paths", {}).get(key)
         if path:
@@ -437,7 +441,6 @@ tabs = st.tabs(
         "Alignment",
         "Crop / ROI",
         "BEV",
-        "Ground Texture",
         "Semantic",
         "Occupancy",
         "Export",
@@ -647,6 +650,69 @@ with tabs[3]:
             value=_default_run_summary_path(config["export"].get("output_dir", "outputs/track_map")),
             key="alignment_ground_texture_run_summary",
         )
+        ground_texture_config["enabled"] = st.checkbox(
+            "Use alignment IPM texture as downstream BEV source",
+            value=bool(ground_texture_config.get("enabled", True)),
+            help="The full export pipeline uses this same VGGT camera-guided IPM texture instead of the point-cloud raster.",
+        )
+        with st.expander("IPM texture settings", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            fusion_options = ["weighted_mean", "best_view"]
+            current_fusion_mode = str(ground_texture_config.get("fusion_mode", "weighted_mean"))
+            if current_fusion_mode not in fusion_options:
+                current_fusion_mode = "weighted_mean"
+            ground_texture_config["fusion_mode"] = c1.selectbox(
+                "Fusion mode",
+                fusion_options,
+                index=fusion_options.index(current_fusion_mode),
+                key="alignment_texture_fusion_mode",
+            )
+            ground_texture_config["confidence_scale"] = c2.number_input(
+                "Confidence scale",
+                min_value=0.001,
+                value=float(
+                    ground_texture_config.get(
+                        "confidence_scale",
+                        config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0),
+                    )
+                    or config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0)
+                ),
+                step=0.1,
+                key="alignment_texture_confidence_scale",
+            )
+            ground_texture_config["view_angle_power"] = c3.slider(
+                "View-angle power",
+                0.0,
+                4.0,
+                float(ground_texture_config.get("view_angle_power", 1.5)),
+                0.1,
+                key="alignment_texture_view_angle_power",
+            )
+            ground_texture_config["distance_power"] = c4.slider(
+                "Distance power",
+                0.0,
+                4.0,
+                float(ground_texture_config.get("distance_power", 1.0)),
+                0.1,
+                key="alignment_texture_distance_power",
+            )
+            c1, c2 = st.columns(2)
+            ground_texture_config["border_margin_px"] = c1.slider(
+                "Image border margin (px)",
+                0.0,
+                32.0,
+                float(ground_texture_config.get("border_margin_px", 4.0)),
+                1.0,
+                key="alignment_texture_border_margin_px",
+            )
+            ground_texture_config["inpaint_radius"] = c2.slider(
+                "Small-hole inpaint radius",
+                0,
+                12,
+                int(ground_texture_config.get("inpaint_radius", 3)),
+                1,
+                key="alignment_texture_inpaint_radius",
+            )
         c1, c2 = st.columns(2)
         alignment_texture_resolution = c1.slider(
             "Alignment IPM resolution (m/pixel)",
@@ -840,123 +906,6 @@ with tabs[5]:
             st.error(str(exc))
 
 with tabs[6]:
-    st.subheader("VGGT Camera-Guided Ground Plane Texture")
-    st.caption("Inverse-project BEV ground cells into the VGGT camera views and fuse sampled pixels on the fitted z=0 plane.")
-    ground_texture_config = config.setdefault("ground_texture", {})
-    ground_texture_config["enabled"] = st.checkbox(
-        "Use Ground Texture as pipeline BEV source",
-        value=bool(ground_texture_config.get("enabled", True)),
-        help="When enabled, downstream semantic segmentation uses this IPM texture instead of the point-cloud raster.",
-    )
-    run_summary_path = st.text_input(
-        "Run summary",
-        value=_default_run_summary_path(config["export"].get("output_dir", "outputs/track_map")),
-        key="ground_texture_run_summary",
-    )
-    output_dir = st.text_input(
-        "Output directory",
-        value=_default_ground_texture_output_dir(run_summary_path),
-        key="ground_texture_output_dir",
-    )
-    c1, c2, c3, c4 = st.columns(4)
-    texture_resolution = c1.slider("Texture resolution (m/pixel)", 0.002, 0.050, 0.005, 0.001)
-    fusion_options = ["weighted_mean", "best_view"]
-    current_fusion_mode = str(ground_texture_config.get("fusion_mode", "weighted_mean"))
-    if current_fusion_mode not in fusion_options:
-        current_fusion_mode = "weighted_mean"
-    texture_fusion_mode = c2.selectbox(
-        "Fusion mode",
-        fusion_options,
-        index=fusion_options.index(current_fusion_mode),
-    )
-    texture_padding = c3.number_input("Padding (m)", min_value=0.0, value=0.0, step=0.05)
-    texture_inpaint_radius = c4.slider(
-        "Small-hole inpaint radius",
-        0,
-        12,
-        int(ground_texture_config.get("inpaint_radius", 3)),
-        1,
-    )
-    c1, c2, c3, c4 = st.columns(4)
-    texture_confidence_scale = c1.number_input(
-        "Confidence scale",
-        min_value=0.001,
-        value=float(
-            ground_texture_config.get(
-                "confidence_scale",
-                config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0),
-            )
-            or config["reconstruction"].get("vggt", {}).get("confidence_threshold", 1.0)
-        ),
-        step=0.1,
-    )
-    texture_view_angle_power = c2.slider(
-        "View-angle power",
-        0.0,
-        4.0,
-        float(ground_texture_config.get("view_angle_power", 1.5)),
-        0.1,
-    )
-    texture_distance_power = c3.slider(
-        "Distance power",
-        0.0,
-        4.0,
-        float(ground_texture_config.get("distance_power", 1.0)),
-        0.1,
-    )
-    texture_border_margin = c4.slider(
-        "Image border margin (px)",
-        0.0,
-        32.0,
-        float(ground_texture_config.get("border_margin_px", 4.0)),
-        1.0,
-    )
-    ground_texture_config["fusion_mode"] = str(texture_fusion_mode)
-    ground_texture_config["confidence_scale"] = float(texture_confidence_scale)
-    ground_texture_config["view_angle_power"] = float(texture_view_angle_power)
-    ground_texture_config["distance_power"] = float(texture_distance_power)
-    ground_texture_config["border_margin_px"] = float(texture_border_margin)
-    ground_texture_config["inpaint_radius"] = int(texture_inpaint_radius)
-
-    if st.button("Render ground texture BEV"):
-        try:
-            with st.spinner("Projecting VGGT camera views onto the fitted ground plane..."):
-                texture_result = render_ground_texture_bev(
-                    run_summary_path=run_summary_path,
-                    output_dir=output_dir,
-                    resolution=float(texture_resolution),
-                    fusion_mode=str(texture_fusion_mode),
-                    padding=float(texture_padding),
-                    confidence_scale=float(texture_confidence_scale),
-                    view_angle_power=float(texture_view_angle_power),
-                    distance_power=float(texture_distance_power),
-                    border_margin_px=float(texture_border_margin),
-                    inpaint_radius=int(texture_inpaint_radius),
-                    unknown_rgb=tuple(int(x) for x in config["bev"].get("unknown_rgb", [80, 80, 80])),
-                )
-            st.session_state.ground_texture_result = texture_result.stats
-            st.success(f"Exported ground texture BEV to {output_dir}")
-        except Exception as exc:
-            st.error(str(exc))
-
-    texture_stats = st.session_state.get("ground_texture_result")
-    if texture_stats:
-        st.write(texture_stats)
-        paths = texture_stats.get("paths", {})
-        cols = st.columns(2)
-        if paths.get("texture"):
-            cols[0].image(paths["texture"], caption="Fused ground texture BEV", use_container_width=True)
-        if paths.get("raw_texture"):
-            cols[1].image(paths["raw_texture"], caption="Raw fused texture before inpaint", use_container_width=True)
-        cols = st.columns(3)
-        if paths.get("observed_mask"):
-            cols[0].image(paths["observed_mask"], caption="Observed mask", use_container_width=True)
-        if paths.get("weight_map"):
-            cols[1].image(paths["weight_map"], caption="Fusion weight", use_container_width=True)
-        if paths.get("observation_count"):
-            cols[2].image(paths["observation_count"], caption="Observation count", use_container_width=True)
-
-with tabs[7]:
     seg = config["segmentation"]
     seg["road_v_max"] = st.slider("Road V max", 0, 255, int(seg.get("road_v_max", 95)))
     seg["road_s_max"] = st.slider("Road S max", 0, 255, int(seg.get("road_s_max", 115)))
@@ -982,7 +931,7 @@ with tabs[7]:
     else:
         st.warning(f"BEV image not found: {bev_rgb_path}. Run BEV preview or full export first.")
 
-with tabs[8]:
+with tabs[7]:
     occ = config["occupancy"]
     occ["non_ground_height_threshold"] = st.slider(
         "Non-ground height threshold (m)", 0.01, 0.30, float(occ.get("non_ground_height_threshold", 0.06)), 0.01
@@ -1064,7 +1013,7 @@ with tabs[8]:
                 use_container_width=True,
             )
 
-with tabs[9]:
+with tabs[8]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))
     config["export"]["map_frame"] = st.text_input("Map frame", value=config["export"].get("map_frame", "map"))
     config_file = st.file_uploader("Optional YAML override", type=["yaml", "yml"])
