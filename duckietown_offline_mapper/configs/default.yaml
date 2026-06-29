@@ -60,6 +60,8 @@ ground_texture:
   inpaint_radius: 3
 
 segmentation:
+  mode: white_lane_occupied
+  white_occupied_unknown_as_free: true
   road_v_max: 95
   road_s_max: 115
   white_v_min: 150

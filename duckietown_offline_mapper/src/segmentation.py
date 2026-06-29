@@ -64,10 +64,20 @@ def segment_bev_rgb(bev_rgb: np.ndarray, config: dict) -> np.ndarray:
 
     open_size = int(config.get("morphology_open", 1))
     close_size = int(config.get("morphology_close", 3))
+    line_close_size = max(0, close_size // 2)
     road = _morph(road, open_size, close_size)
-    white = _morph(white, 0, max(1, close_size // 2))
-    yellow = _morph(yellow, 0, max(1, close_size // 2))
-    red = _morph(red, 0, max(1, close_size // 2))
+    white = _morph(white, 0, line_close_size)
+    yellow = _morph(yellow, 0, line_close_size)
+    red = _morph(red, 0, line_close_size)
+
+    if config.get("mode", "white_lane_occupied") == "white_lane_occupied":
+        unknown_as_free = bool(config.get("white_occupied_unknown_as_free", True))
+        fill_class = SemanticClass.DRIVABLE_ROAD if unknown_as_free else SemanticClass.UNKNOWN
+        semantic = np.full(rgb.shape[:2], fill_class, dtype=np.uint8)
+        if not unknown_as_free:
+            semantic[~unknown] = SemanticClass.DRIVABLE_ROAD
+        semantic[white] = SemanticClass.NON_DRIVABLE
+        return semantic
 
     semantic = np.full(rgb.shape[:2], SemanticClass.UNKNOWN, dtype=np.uint8)
     observed = ~unknown
@@ -83,4 +93,3 @@ def colorize_semantic(semantic: np.ndarray) -> np.ndarray:
     for cls, color in SEMANTIC_COLORS.items():
         out[semantic == int(cls)] = color
     return out
-

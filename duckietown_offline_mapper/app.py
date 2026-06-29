@@ -19,7 +19,7 @@ from src.keyframes import extract_keyframes, load_image_folder
 from src.occupancy import fuse_occupancy, inflate_obstacles
 from src.plane import fit_ground_plane
 from src.pointcloud import PointCloud, load_ply
-from src.segmentation import colorize_semantic, segment_bev_rgb
+from src.segmentation import SemanticClass, colorize_semantic, segment_bev_rgb
 
 
 st.set_page_config(page_title="Duckietown Offline Mapper", layout="wide")
@@ -39,6 +39,7 @@ METRIC_PIXELS_PER_METER = 1000
 METRIC_RENDER_LIMIT_PIXELS = 32_000_000
 METRIC_RENDER_VERSION = "world-origin-axes-v1"
 METRIC_RENDER_FILENAME = "metric_aligned_map_world_origin_1000pxpm.png"
+PREVIEW_DISPLAY_WIDTH = 1400
 
 
 def _image_rgb_from_bgr(frame):
@@ -1148,35 +1149,71 @@ with tabs[5]:
 
 with tabs[6]:
     seg = config["segmentation"]
+    mode_options = ["white_lane_occupied", "duckietown_color_classes"]
+    seg_mode = str(seg.get("mode", "white_lane_occupied"))
+    if seg_mode not in mode_options:
+        seg_mode = "white_lane_occupied"
+    seg["mode"] = st.selectbox("Semantic mode", mode_options, index=mode_options.index(seg_mode))
+    seg["white_occupied_unknown_as_free"] = st.checkbox(
+        "Treat non-white / unknown as non-occupied",
+        value=bool(seg.get("white_occupied_unknown_as_free", True)),
+    )
     seg["road_v_max"] = st.slider("Road V max", 0, 255, int(seg.get("road_v_max", 95)))
     seg["road_s_max"] = st.slider("Road S max", 0, 255, int(seg.get("road_s_max", 115)))
     seg["white_v_min"] = st.slider("White V min", 0, 255, int(seg.get("white_v_min", 150)))
+    seg["white_s_max"] = st.slider("White S max", 0, 255, int(seg.get("white_s_max", 85)))
     seg["yellow_s_min"] = st.slider("Yellow S min", 0, 255, int(seg.get("yellow_s_min", 60)))
     seg["morphology_open"] = st.slider("Opening radius", 0, 10, int(seg.get("morphology_open", 1)))
     seg["morphology_close"] = st.slider("Closing radius", 0, 15, int(seg.get("morphology_close", 3)))
     last = st.session_state.get("last_run")
     bev_rgb_path = st.text_input("BEV image for live semantic preview", value=_latest_bev_rgb_path(config, last))
     bev_path = Path(bev_rgb_path)
-    if bev_path.exists():
-        bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+    semantic_signature = None
+    if not bev_path.exists():
+        st.warning(f"BEV image not found: {bev_rgb_path}. Run BEV preview or full export first.")
+    else:
         preview_config = dict(seg)
         preview_config["unknown_rgb"] = list(config["bev"].get("unknown_rgb", [80, 80, 80]))
-        semantic = segment_bev_rgb(bev_rgb, preview_config)
-        semantic_rgb = colorize_semantic(semantic)
-        unique, counts = np.unique(semantic, return_counts=True)
-        class_counts = {str(int(cls)): int(count) for cls, count in zip(unique, counts)}
-        st.write(
-            {
-                "source": str(bev_path),
-                "coordinate_convention": "metric_aligned_x_left_y_up" if _is_metric_aligned_bev_path(bev_path, config) else "standard_bev_x_right_y_up",
-                "class_pixel_counts": class_counts,
-            }
-        )
+        semantic_signature = {
+            "source": str(bev_path),
+            "mtime": float(bev_path.stat().st_mtime),
+            "coordinate_convention": "metric_aligned_x_left_y_up" if _is_metric_aligned_bev_path(bev_path, config) else "standard_bev_x_right_y_up",
+            "config": preview_config,
+        }
+        if st.button("Run semantic preview", key="run_semantic_preview"):
+            with st.spinner("Computing semantic preview..."):
+                bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+                semantic = segment_bev_rgb(bev_rgb, preview_config)
+                semantic_rgb = colorize_semantic(semantic)
+                unique, counts = np.unique(semantic, return_counts=True)
+                class_counts = {str(int(cls)): int(count) for cls, count in zip(unique, counts)}
+                display_width = min(PREVIEW_DISPLAY_WIDTH, int(bev_rgb.shape[1]))
+                st.session_state.semantic_preview = {
+                    "signature": semantic_signature,
+                    "stats": {
+                        "source": str(bev_path),
+                        "coordinate_convention": semantic_signature["coordinate_convention"],
+                        "semantic_mode": str(seg.get("mode", "white_lane_occupied")),
+                        "computed_image_size": [int(bev_rgb.shape[1]), int(bev_rgb.shape[0])],
+                        "display_width_px": display_width,
+                        "white_lane_occupied_cells": class_counts.get(str(int(SemanticClass.NON_DRIVABLE)), 0),
+                        "non_occupied_cells": class_counts.get(str(int(SemanticClass.DRIVABLE_ROAD)), 0),
+                        "class_pixel_counts": class_counts,
+                    },
+                    "display_bev_rgb": _resize_rgb_to_width(bev_rgb, display_width),
+                    "display_semantic_rgb": _resize_rgb_to_width(semantic_rgb, display_width),
+                }
+
+    semantic_preview = st.session_state.get("semantic_preview")
+    if semantic_preview:
+        if semantic_signature is not None and semantic_preview.get("signature") != semantic_signature:
+            st.warning("Displayed semantic preview is stale. Press Run semantic preview to refresh it.")
+        st.write(semantic_preview["stats"])
         cols = st.columns(2)
-        cols[0].image(bev_rgb, caption="Current BEV source", use_container_width=True)
-        cols[1].image(semantic_rgb, caption="Live semantic preview", use_container_width=True)
-    else:
-        st.warning(f"BEV image not found: {bev_rgb_path}. Run BEV preview or full export first.")
+        cols[0].image(semantic_preview["display_bev_rgb"], caption="Current BEV source", use_container_width=True)
+        cols[1].image(semantic_preview["display_semantic_rgb"], caption="Semantic preview", use_container_width=True)
+    elif bev_path.exists():
+        st.info("Press Run semantic preview to compute the color-filtered semantic map.")
 
 with tabs[7]:
     occ = config["occupancy"]
@@ -1209,77 +1246,117 @@ with tabs[7]:
     if missing:
         st.warning(f"Missing live occupancy source files: {missing}. Run BEV preview or full export first.")
     else:
-        bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
         metadata = _metadata_from_map_yaml(metadata_path)
         metric_source = _is_metric_aligned_bev_path(bev_path, config)
+        semantic_config = dict(config["segmentation"])
+        semantic_config["unknown_rgb"] = list(config["bev"].get("unknown_rgb", [80, 80, 80]))
+        occupancy_signature = {
+            "bev": str(bev_path),
+            "bev_mtime": float(bev_path.stat().st_mtime),
+            "cloud": str(cloud_path),
+            "cloud_mtime": float(cloud_path.stat().st_mtime),
+            "metadata": str(metadata_path),
+            "metadata_mtime": float(metadata_path.stat().st_mtime),
+            "semantic": semantic_config,
+            "occupancy": {
+                "non_ground_height_threshold": float(occ.get("non_ground_height_threshold", 0.06)),
+                "robot_radius": float(occ.get("robot_radius", 0.085)),
+                "safety_margin": float(occ.get("safety_margin", 0.025)),
+                "unknown_as_occupied": bool(occ.get("unknown_as_occupied", False)),
+            },
+            "metric_source": bool(metric_source),
+        }
         if metric_source:
             expected_width, expected_height = _metric_view_shape(metadata, METRIC_PIXELS_PER_METER)
             expected_shape = (expected_height, expected_width)
         else:
             expected_shape = (metadata.height, metadata.width)
-        if bev_rgb.shape[:2] != expected_shape:
-            st.warning(
-                "BEV image size does not match map metadata: "
-                f"image={bev_rgb.shape[1]}x{bev_rgb.shape[0]}, expected={expected_shape[1]}x{expected_shape[0]}."
-            )
-        else:
-            semantic_config = dict(config["segmentation"])
-            semantic_config["unknown_rgb"] = list(config["bev"].get("unknown_rgb", [80, 80, 80]))
-            semantic = segment_bev_rgb(bev_rgb, semantic_config)
-            cloud = _load_cloud_for_viewer(str(cloud_path), cloud_path.stat().st_mtime)
-            if metric_source:
-                raw_obstacle = _obstacle_grid_from_metric_view_height(
-                    cloud,
-                    metadata,
-                    bev_rgb.shape[:2],
-                    float(occ.get("non_ground_height_threshold", 0.06)),
-                    METRIC_PIXELS_PER_METER,
-                )
-                occupancy_resolution = 1.0 / float(METRIC_PIXELS_PER_METER)
-                coordinate_convention = "metric_aligned_x_left_y_up"
-            else:
-                raw_obstacle = _obstacle_grid_from_aligned_height(
-                    cloud,
-                    metadata,
-                    float(occ.get("non_ground_height_threshold", 0.06)),
-                )
-                occupancy_resolution = float(metadata.resolution)
-                coordinate_convention = "standard_bev_x_right_y_up"
-            inflation_radius = float(occ.get("robot_radius", 0.085)) + float(occ.get("safety_margin", 0.025))
-            inflated_obstacle = inflate_obstacles(raw_obstacle, inflation_radius, occupancy_resolution)
-            occupancy_grid = fuse_occupancy(
-                semantic,
-                inflated_obstacle,
-                unknown_as_occupied=bool(occ.get("unknown_as_occupied", False)),
-            )
-            stats = {
-                "source": {
-                    "bev_rgb": str(bev_path),
-                    "aligned_cloud": str(cloud_path),
-                    "map_metadata": str(metadata_path),
-                    "coordinate_convention": coordinate_convention,
-                },
-                "occupancy_resolution_m_per_cell": float(occupancy_resolution),
-                "raw_obstacle_cells": int(np.count_nonzero(raw_obstacle)),
-                "inflated_obstacle_cells": int(np.count_nonzero(inflated_obstacle)),
-                "inflation_radius_m": float(inflation_radius),
-                "free_cells": int(np.count_nonzero(occupancy_grid == 0)),
-                "occupied_cells": int(np.count_nonzero(occupancy_grid == 100)),
-                "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
+        st.write(
+            {
+                "expected_image_size": [int(expected_shape[1]), int(expected_shape[0])],
+                "coordinate_convention": "metric_aligned_x_left_y_up" if metric_source else "standard_bev_x_right_y_up",
             }
-            st.write(stats)
+        )
+        if st.button("Run occupancy preview", key="run_occupancy_preview"):
+            with st.spinner("Computing occupancy preview..."):
+                bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+                if bev_rgb.shape[:2] != expected_shape:
+                    st.warning(
+                        "BEV image size does not match map metadata: "
+                        f"image={bev_rgb.shape[1]}x{bev_rgb.shape[0]}, expected={expected_shape[1]}x{expected_shape[0]}."
+                    )
+                else:
+                    semantic = segment_bev_rgb(bev_rgb, semantic_config)
+                    cloud = _load_cloud_for_viewer(str(cloud_path), cloud_path.stat().st_mtime)
+                    if metric_source:
+                        raw_obstacle = _obstacle_grid_from_metric_view_height(
+                            cloud,
+                            metadata,
+                            bev_rgb.shape[:2],
+                            float(occ.get("non_ground_height_threshold", 0.06)),
+                            METRIC_PIXELS_PER_METER,
+                        )
+                        occupancy_resolution = 1.0 / float(METRIC_PIXELS_PER_METER)
+                        coordinate_convention = "metric_aligned_x_left_y_up"
+                    else:
+                        raw_obstacle = _obstacle_grid_from_aligned_height(
+                            cloud,
+                            metadata,
+                            float(occ.get("non_ground_height_threshold", 0.06)),
+                        )
+                        occupancy_resolution = float(metadata.resolution)
+                        coordinate_convention = "standard_bev_x_right_y_up"
+                    inflation_radius = float(occ.get("robot_radius", 0.085)) + float(occ.get("safety_margin", 0.025))
+                    inflated_obstacle = inflate_obstacles(raw_obstacle, inflation_radius, occupancy_resolution)
+                    occupancy_grid = fuse_occupancy(
+                        semantic,
+                        inflated_obstacle,
+                        unknown_as_occupied=bool(occ.get("unknown_as_occupied", False)),
+                    )
+                    display_width = min(PREVIEW_DISPLAY_WIDTH, int(bev_rgb.shape[1]))
+                    st.session_state.occupancy_preview = {
+                        "signature": occupancy_signature,
+                        "stats": {
+                            "source": {
+                                "bev_rgb": str(bev_path),
+                                "aligned_cloud": str(cloud_path),
+                                "map_metadata": str(metadata_path),
+                                "coordinate_convention": coordinate_convention,
+                            },
+                            "computed_image_size": [int(bev_rgb.shape[1]), int(bev_rgb.shape[0])],
+                            "display_width_px": display_width,
+                            "occupancy_resolution_m_per_cell": float(occupancy_resolution),
+                            "raw_obstacle_cells": int(np.count_nonzero(raw_obstacle)),
+                            "inflated_obstacle_cells": int(np.count_nonzero(inflated_obstacle)),
+                            "inflation_radius_m": float(inflation_radius),
+                            "free_cells": int(np.count_nonzero(occupancy_grid == 0)),
+                            "occupied_cells": int(np.count_nonzero(occupancy_grid == 100)),
+                            "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
+                        },
+                        "raw_obstacle_rgb": _resize_rgb_to_width(raw_obstacle.astype(np.uint8) * 255, display_width),
+                        "inflated_obstacle_rgb": _resize_rgb_to_width(inflated_obstacle.astype(np.uint8) * 255, display_width),
+                        "final_occupancy_rgb": _resize_rgb_to_width(ros_image_from_occupancy(occupancy_grid), display_width),
+                    }
+
+        occupancy_preview = st.session_state.get("occupancy_preview")
+        if occupancy_preview:
+            if occupancy_preview.get("signature") != occupancy_signature:
+                st.warning("Displayed occupancy preview is stale. Press Run occupancy preview to refresh it.")
+            st.write(occupancy_preview["stats"])
             cols = st.columns(3)
-            cols[0].image((raw_obstacle.astype(np.uint8) * 255), caption="Raw height obstacles", use_container_width=True)
+            cols[0].image(occupancy_preview["raw_obstacle_rgb"], caption="Raw height obstacles", use_container_width=True)
             cols[1].image(
-                (inflated_obstacle.astype(np.uint8) * 255),
+                occupancy_preview["inflated_obstacle_rgb"],
                 caption="Inflated obstacles",
                 use_container_width=True,
             )
             cols[2].image(
-                ros_image_from_occupancy(occupancy_grid),
-                caption="Live final occupancy",
+                occupancy_preview["final_occupancy_rgb"],
+                caption="Occupancy preview",
                 use_container_width=True,
             )
+        else:
+            st.info("Press Run occupancy preview to compute the occupancy map.")
 
 with tabs[8]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))

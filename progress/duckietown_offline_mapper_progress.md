@@ -667,3 +667,62 @@ Date: 2026-06-29
   - Local HTTP check: `200`.
   - Remote process check after restart: about `75 MB` RSS and low CPU.
   - Browser URL: `http://127.0.0.1:8501`
+
+## White Lane Semantic Occupancy Mode
+
+Date: 2026-06-29
+
+- Request:
+  - In the Semantic page, use color filtering so white lane lines are marked as occupied.
+  - Gray, yellow, and red regions should be treated as non-occupied.
+- Troubleshooting route:
+  - Existing segmentation used Duckietown-style classes: black road as drivable, white/yellow as lane markings, red as stop line.
+  - Existing occupancy fusion already treats `NON_DRIVABLE` as occupied and `DRIVABLE_ROAD` as free, so the cleanest change is to map white pixels to `NON_DRIVABLE` and all non-white pixels to `DRIVABLE_ROAD`.
+  - Found that line-color morphology forced a 1-pixel close operation even when `morphology_close` was set to 0; fixed this so white filtering can be made strict.
+- Fix:
+  - Added default segmentation mode `white_lane_occupied`.
+  - In this mode, white pixels are semantic `NON_DRIVABLE`, and all non-white / unknown pixels are semantic `DRIVABLE_ROAD` by default.
+  - Added Semantic UI controls for `Semantic mode`, `Treat non-white / unknown as non-occupied`, and `White S max`.
+  - Semantic preview stats now report `white_lane_occupied_cells` and `non_occupied_cells`.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/segmentation.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `9 passed`
+
+## Semantic And Occupancy Preview Downsample Guard
+
+Date: 2026-06-29
+
+- Problem:
+  - After downstream pages started preferring the 1000 px/m metric aligned BEV, Streamlit became unresponsive when Semantic or Occupancy tried to display multiple full-resolution preview images.
+  - The restarted Streamlit process reached high CPU and several GB of memory before HTTP timed out.
+- Troubleshooting route:
+  - The segmentation computation itself is acceptable, but sending full 9 MP source, semantic, and occupancy arrays to the browser on every rerun is too expensive.
+  - The metric BEV should still be used for computation; only the on-page preview needs to be downsampled.
+- Fix:
+  - Added `PREVIEW_DISPLAY_WIDTH = 1400`.
+  - Semantic still computes class masks on the full-resolution BEV, but displays resized source and semantic previews.
+  - Occupancy still computes obstacle, inflated obstacle, and final occupancy at full resolution, but displays resized preview images.
+  - Semantic and Occupancy stats now report both computed image size and display width.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/segmentation.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `9 passed`
+
+## Semantic And Occupancy Explicit Preview Buttons
+
+Date: 2026-06-29
+
+- Problem:
+  - Downsampling displayed images reduced browser payload, but the Streamlit page could still repeatedly compute full-resolution semantic and occupancy previews on rerun.
+  - With a 1000 px/m metric BEV, active browser sessions kept the server busy and memory climbed into multi-GB range.
+- Fix:
+  - Semantic preview now computes only when `Run semantic preview` is pressed.
+  - Occupancy preview now computes only when `Run occupancy preview` is pressed.
+  - Both pages store resized preview images and stats in `st.session_state`.
+  - If inputs or parameters change after a preview is computed, the page shows a stale-preview warning instead of recomputing automatically.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/segmentation.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `9 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2403497`.
+  - Local HTTP check: `200`.
+  - Remote process check after restart: about `75 MB` RSS and low CPU.
+  - Browser URL: `http://127.0.0.1:8501`
