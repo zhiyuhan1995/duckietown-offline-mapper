@@ -174,6 +174,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         inflated_obstacle,
         unknown_as_occupied=bool(obstacle_config.get("unknown_as_occupied", False)),
     )
+    gradient_margin_m = float(obstacle_config.get("gradient_margin_m", 0.0))
 
     project_metadata = {
         "map_frame_name": config.get("export", {}).get("map_frame", "map"),
@@ -183,6 +184,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         "robot_radius": float(obstacle_config.get("robot_radius", 0.085)),
         "safety_margin": float(obstacle_config.get("safety_margin", 0.025)),
         "obstacle_inflation_radius": inflation_radius,
+        "gradient_margin_m": gradient_margin_m,
         "semantic_classes": {cls.name: int(cls.value) for cls in SemanticClass},
         "bev_generation": bev_generation_metadata,
         "ground_plane": ground_plane_metadata,
@@ -197,6 +199,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         occupancy_grid,
         metadata,
         project_metadata,
+        gradient_margin_m=gradient_margin_m,
     )
     if texture_result is not None:
         paths.update({f"ground_texture_{k}": v for k, v in texture_result.paths.items()})
@@ -210,5 +213,6 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             "free_cells": int(np.count_nonzero(occupancy_grid == 0)),
             "occupied_cells": int(np.count_nonzero(occupancy_grid == 100)),
             "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
+            "gradient_margin_m": gradient_margin_m,
         },
     }

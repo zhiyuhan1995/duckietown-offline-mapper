@@ -40,6 +40,23 @@ def inflate_obstacles(obstacle_grid: np.ndarray, radius_m: float, resolution: fl
     return ndimage.binary_dilation(obstacle, structure=struct)
 
 
+def gradient_margin_from_occupancy(
+    occupancy_grid: np.ndarray,
+    margin_m: float,
+    resolution: float,
+) -> np.ndarray:
+    occupied = np.asarray(occupancy_grid) == 100
+    margin_cells = float(margin_m) / float(resolution)
+    layer = occupied.astype(np.float32)
+    if margin_cells <= 0.0 or not np.any(occupied):
+        return layer
+
+    distances = ndimage.distance_transform_edt(~occupied).astype(np.float32)
+    margin = np.clip(1.0 - distances / float(margin_cells), 0.0, 1.0)
+    margin[occupied] = 1.0
+    return margin.astype(np.float32)
+
+
 def fuse_occupancy(
     semantic_grid: np.ndarray,
     obstacle_grid: np.ndarray,

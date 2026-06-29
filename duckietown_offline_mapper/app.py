@@ -13,11 +13,11 @@ import yaml
 
 from src.alignment import estimate_sim2
 from src.bev import metadata_from_bounds, world_to_grid
-from src.export import ros_image_from_occupancy
+from src.export import ros_image_from_occupancy, ros_image_from_occupancy_margin
 from src.ground_texture import render_ground_texture_bev
 from src.io_utils import deep_update, load_yaml
 from src.keyframes import extract_keyframes, load_image_folder
-from src.occupancy import fuse_occupancy, inflate_obstacles
+from src.occupancy import fuse_occupancy, gradient_margin_from_occupancy, inflate_obstacles
 from src.plane import fit_ground_plane
 from src.pointcloud import PointCloud, load_ply
 from src.segmentation import SemanticClass, colorize_semantic, segment_bev_rgb
@@ -679,6 +679,12 @@ def _load_ros_map_for_world_view(map_yaml_path: str | Path) -> dict:
         "size": [int(width), int(height)],
         "metadata": map_data,
     }
+
+
+@st.cache_data(show_spinner=False)
+def _load_numpy_array(path: str, mtime: float) -> np.ndarray:
+    del mtime
+    return np.load(path)
 
 
 def _control_points_for_world_view(metadata_path: str | Path, config: dict) -> list[dict]:
@@ -1516,6 +1522,13 @@ with tabs[7]:
     st.caption("Occupancy preview defaults to 0.01 m/cell for speed. 0.001 m/cell creates ~9M cells and makes obstacle inflation slow.")
     occ["robot_radius"] = st.slider("Robot radius (m)", 0.02, 0.25, float(occ.get("robot_radius", 0.085)), 0.005)
     occ["safety_margin"] = st.slider("Safety margin (m)", 0.0, 0.20, float(occ.get("safety_margin", 0.025)), 0.005)
+    occ["gradient_margin_m"] = st.slider(
+        "Gradient margin radius (m)",
+        0.0,
+        1.0,
+        float(occ.get("gradient_margin_m", 0.15)),
+        0.01,
+    )
     occ["unknown_as_occupied"] = st.checkbox("Unknown as occupied", value=bool(occ.get("unknown_as_occupied", False)))
     last = st.session_state.get("last_run")
     bev_rgb_path = st.text_input(
@@ -1557,6 +1570,7 @@ with tabs[7]:
                 "preview_resolution": float(occ.get("preview_resolution", 0.01)),
                 "robot_radius": float(occ.get("robot_radius", 0.085)),
                 "safety_margin": float(occ.get("safety_margin", 0.025)),
+                "gradient_margin_m": float(occ.get("gradient_margin_m", 0.15)),
                 "unknown_as_occupied": bool(occ.get("unknown_as_occupied", False)),
             },
             "metric_source": bool(metric_source),
@@ -1634,11 +1648,16 @@ with tabs[7]:
                         unknown_as_occupied=bool(occ.get("unknown_as_occupied", False)),
                     )
                     timings["fuse_occupancy_s"] = round(time.perf_counter() - step_t, 4)
+                    step_t = time.perf_counter()
+                    gradient_margin_m = float(occ.get("gradient_margin_m", 0.15))
+                    margin_layer = gradient_margin_from_occupancy(occupancy_grid, gradient_margin_m, occupancy_resolution)
+                    timings["gradient_margin_s"] = round(time.perf_counter() - step_t, 4)
                     display_width = min(PREVIEW_DISPLAY_WIDTH, int(bev_rgb.shape[1]))
                     step_t = time.perf_counter()
                     raw_obstacle_preview = _resize_rgb_to_width(raw_obstacle.astype(np.uint8) * 255, display_width)
                     inflated_obstacle_preview = _resize_rgb_to_width(inflated_obstacle.astype(np.uint8) * 255, display_width)
                     final_occupancy_preview = _resize_rgb_to_width(ros_image_from_occupancy(occupancy_grid), display_width)
+                    margin_preview = _resize_rgb_to_width(ros_image_from_occupancy_margin(occupancy_grid, margin_layer), display_width)
                     timings["preview_images_s"] = round(time.perf_counter() - step_t, 4)
                     timings["total_s"] = round(sum(timings.values()), 4)
                     st.session_state.occupancy_preview = {
@@ -1657,6 +1676,8 @@ with tabs[7]:
                             "raw_obstacle_cells": int(np.count_nonzero(raw_obstacle)),
                             "inflated_obstacle_cells": int(np.count_nonzero(inflated_obstacle)),
                             "inflation_radius_m": float(inflation_radius),
+                            "gradient_margin_m": float(gradient_margin_m),
+                            "gradient_margin_nonzero_cells": int(np.count_nonzero(margin_layer > 0.0)),
                             "free_cells": int(np.count_nonzero(occupancy_grid == 0)),
                             "occupied_cells": int(np.count_nonzero(occupancy_grid == 100)),
                             "unknown_cells": int(np.count_nonzero(occupancy_grid == -1)),
@@ -1664,6 +1685,7 @@ with tabs[7]:
                         "raw_obstacle_rgb": raw_obstacle_preview,
                         "inflated_obstacle_rgb": inflated_obstacle_preview,
                         "final_occupancy_rgb": final_occupancy_preview,
+                        "gradient_margin_rgb": margin_preview,
                     }
 
         occupancy_preview = st.session_state.get("occupancy_preview")
@@ -1671,7 +1693,7 @@ with tabs[7]:
             if occupancy_preview.get("signature") != occupancy_signature:
                 st.warning("Displayed occupancy preview is stale. Press Run occupancy preview to refresh it.")
             st.write(occupancy_preview["stats"])
-            cols = st.columns(3)
+            cols = st.columns(4)
             cols[0].image(occupancy_preview["raw_obstacle_rgb"], caption="Raw height obstacles", use_container_width=True)
             cols[1].image(
                 occupancy_preview["inflated_obstacle_rgb"],
@@ -1680,7 +1702,12 @@ with tabs[7]:
             )
             cols[2].image(
                 occupancy_preview["final_occupancy_rgb"],
-                caption="Occupancy preview",
+                caption="Hard occupancy",
+                use_container_width=True,
+            )
+            cols[3].image(
+                occupancy_preview["gradient_margin_rgb"],
+                caption="Gradient margin cost",
                 use_container_width=True,
             )
         else:
@@ -1691,14 +1718,26 @@ with tabs[8]:
     output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
     default_map_yaml = output_dir / "map.yaml"
     default_map_metadata = output_dir / "map_metadata.yaml"
+    default_occupancy_grid = output_dir / "occupancy_grid.npy"
     map_yaml_path = st.text_input("ROS map YAML", value=str(default_map_yaml), key="world_map_yaml_path")
     map_metadata_path = st.text_input("Map metadata", value=str(default_map_metadata), key="world_map_metadata_path")
+    occupancy_grid_path = st.text_input("Occupancy grid for margin preview", value=str(default_occupancy_grid), key="world_map_occupancy_grid_path")
 
     c1, c2, c3, c4 = st.columns(4)
     world_view_height = c1.slider("Viewer height", 520, 1100, 760, 20)
     world_grid_spacing = c2.slider("Grid spacing (m)", 0.05, 1.0, 0.25, 0.05)
     world_padding = c3.slider("Padding (m)", 0.0, 2.0, 0.20, 0.05)
     show_world_axes = c4.checkbox("Show world axes", value=True)
+    c1, c2 = st.columns(2)
+    config["occupancy"]["gradient_margin_m"] = c1.slider(
+        "Gradient margin radius (m)",
+        0.0,
+        1.0,
+        float(config["occupancy"].get("gradient_margin_m", 0.15)),
+        0.01,
+        key="world_gradient_margin_m",
+    )
+    show_margin_preview = c2.checkbox("Preview gradient margin from occupancy grid", value=True)
     show_world_control = st.checkbox("Show alignment target control points", value=True)
 
     map_yaml = Path(map_yaml_path)
@@ -1707,6 +1746,37 @@ with tabs[8]:
     else:
         try:
             map_info = _load_ros_map_for_world_view(map_yaml)
+            margin_preview_stats = None
+            occupancy_grid_path_obj = Path(occupancy_grid_path)
+            if show_margin_preview:
+                if occupancy_grid_path_obj.exists():
+                    occupancy_grid = _load_numpy_array(str(occupancy_grid_path_obj), occupancy_grid_path_obj.stat().st_mtime)
+                    expected_shape = (int(map_info["size"][1]), int(map_info["size"][0]))
+                    if occupancy_grid.shape[:2] == expected_shape:
+                        margin_layer = gradient_margin_from_occupancy(
+                            occupancy_grid,
+                            float(config["occupancy"].get("gradient_margin_m", 0.15)),
+                            float(map_info["resolution"]),
+                        )
+                        map_info = dict(map_info)
+                        map_info["image"] = np.stack(
+                            [ros_image_from_occupancy_margin(occupancy_grid, margin_layer)] * 3,
+                            axis=-1,
+                        )
+                        map_info["image_path"] = f"{occupancy_grid_path_obj} + gradient margin preview"
+                        margin_preview_stats = {
+                            "margin_radius_m": float(config["occupancy"].get("gradient_margin_m", 0.15)),
+                            "margin_nonzero_cells": int(np.count_nonzero(margin_layer > 0.0)),
+                            "margin_max": float(np.max(margin_layer)) if margin_layer.size else 0.0,
+                            "value_convention": "1 at occupied cells, linearly falling to 0 at margin radius",
+                        }
+                    else:
+                        st.warning(
+                            "Occupancy grid shape does not match map image size: "
+                            f"grid={occupancy_grid.shape[:2]}, map={expected_shape}."
+                        )
+                else:
+                    st.warning(f"Occupancy grid not found: {occupancy_grid_path}")
             control_points = _control_points_for_world_view(map_metadata_path, config)
             x_min, x_max, y_min, y_max = [float(v) for v in map_info["bounds"]]
             target_checks = []
@@ -1734,6 +1804,8 @@ with tabs[8]:
                         "y_max": y_max,
                     },
                     "origin_lower_left_xy_yaw": map_info["origin"],
+                    "map_yaml_mode": map_info["metadata"].get("mode", "trinary"),
+                    "gradient_margin_preview": margin_preview_stats,
                     "display_convention": "ROS/map view: +x right, +y up",
                     "alignment_targets": target_checks,
                 }
@@ -1754,6 +1826,15 @@ with tabs[8]:
 with tabs[9]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))
     config["export"]["map_frame"] = st.text_input("Map frame", value=config["export"].get("map_frame", "map"))
+    config["occupancy"]["gradient_margin_m"] = st.slider(
+        "Export gradient margin radius (m)",
+        0.0,
+        1.0,
+        float(config["occupancy"].get("gradient_margin_m", 0.15)),
+        0.01,
+        key="export_gradient_margin_m",
+    )
+    st.caption("Full export writes map.yaml/map.png with this gradient margin, plus map_hard.yaml/map_hard.png for the hard occupancy map.")
     config_file = st.file_uploader("Optional YAML override", type=["yaml", "yml"])
     if config_file:
         override = yaml.safe_load(config_file.getvalue().decode("utf-8")) or {}

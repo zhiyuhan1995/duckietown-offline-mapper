@@ -75,8 +75,14 @@ The export directory contains:
 - `semantic_grid.npy`
 - `obstacle_grid.npy`
 - `occupancy_grid.npy`
+- `occupancy_margin.npy`
+- `occupancy_cost_grid.npy`
 - `map.png`
 - `map.yaml`
+- `map_hard.png`
+- `map_hard.yaml`
+- `map_with_margin.png`
+- `map_with_margin.yaml`
 - `map_metadata.yaml`
 - `run_summary.yaml`
 - `work/camera_extrinsics.npy`
@@ -89,7 +95,11 @@ The export directory contains:
 Occupancy conventions:
 
 - `occupancy_grid.npy`: `0 = free`, `100 = occupied`, `-1 = unknown`
-- `map.png`: free `254`, occupied `0`, unknown `205`
+- `occupancy_margin.npy`: `1.0` on occupied cells, linearly falling to `0.0` at `occupancy.gradient_margin_m`
+- `occupancy_cost_grid.npy`: `0..100` integer cost from the margin layer, `-1 = unknown`
+- `map.yaml` / `map.png`: default ROS map with gradient margin, using `mode: scale`
+- `map_hard.yaml` / `map_hard.png`: hard trinary occupancy map, free `254`, occupied `0`, unknown `205`
+- `map_with_margin.yaml` / `map_with_margin.png`: explicit copy of the default gradient-margin map
 
 ## Coordinate Flow
 
@@ -99,4 +109,3 @@ Occupancy conventions:
 4. Optional user control points estimate Sim(2)/SE(2) metric map alignment.
 5. Auto or manual ROI defines BEV bounds.
 6. BEV semantic segmentation and non-ground obstacle projection fuse into ROS occupancy.
-

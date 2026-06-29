@@ -831,3 +831,42 @@ Date: 2026-06-29
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `11 passed`
+
+## Gradient Margin Cost Map Export
+
+Date: 2026-06-29
+
+- Request:
+  - Add an adjustable gradient margin around occupied cells in the World Map visualization.
+  - The margin value should be `1.0` at occupied cells and fall linearly to `0.0` with distance.
+  - Final export should include this margin layer in the exported planning map.
+  - Use an empty GPU on `myristica` for following GPU work.
+- Troubleshooting route:
+  - A pure trinary `map.png` cannot represent a continuous cost falloff.
+  - ROS `map_server` / Nav2 can carry grayscale maps when YAML `mode: scale` is used.
+  - To keep a hard occupancy fallback, export both the gradient-margin map and a hard trinary map.
+- Fix:
+  - Added `occupancy.gradient_margin_m` to config, default `0.15 m`.
+  - Added `gradient_margin_from_occupancy(...)`, using Euclidean distance transform.
+  - Added Occupancy page slider and preview image for the gradient margin cost.
+  - Added World Map page slider that recomputes the margin layer from `occupancy_grid.npy` and displays it in real-world coordinates.
+  - Added Export page slider for the exact margin radius used by full export.
+  - Full export now writes:
+    - `map.yaml` / `map.png`: default gradient-margin ROS map, YAML `mode: scale`
+    - `map_with_margin.yaml` / `map_with_margin.png`: explicit copy of the gradient-margin map
+    - `map_hard.yaml` / `map_hard.png`: hard trinary occupancy map
+    - `occupancy_margin.npy`: float32 margin layer, `0..1`
+    - `occupancy_cost_grid.npy`: int8 cost layer, `0..100`, `-1 = unknown`
+  - README export docs updated.
+- GPU / service:
+  - Checked `myristica`: GPUs 0-3 were all idle at `4 MiB / 24564 MiB`.
+  - Re-ran full export on `myristica` GPU 0.
+  - Moved Streamlit service from `heracleum` to `myristica`, using GPU 0 for future subprocess work.
+  - Updated local tunnel `127.0.0.1:8501` to forward to `myristica`.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/export.py duckietown_offline_mapper/src/pipeline.py duckietown_offline_mapper/src/occupancy.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `13 passed`
+  - Full export on `myristica` finished with `gradient_margin_m: 0.15`.
+  - `map.yaml` now has `mode: scale`.
+  - `map.png` has 186 unique grayscale values; `map_hard.png` has only 2 values.
+  - `occupancy_margin.npy` has shape `(585, 616)`, dtype `float32`, min `0.0`, max `1.0`.

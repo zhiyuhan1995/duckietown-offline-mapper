@@ -1,6 +1,6 @@
 import numpy as np
 
-from duckietown_offline_mapper.src.occupancy import fuse_occupancy, inflate_obstacles
+from duckietown_offline_mapper.src.occupancy import fuse_occupancy, gradient_margin_from_occupancy, inflate_obstacles
 from duckietown_offline_mapper.src.segmentation import SemanticClass
 
 
@@ -41,3 +41,17 @@ def test_inflate_obstacles_large_radius_distance_path():
     assert inflated[40, 40]
     assert inflated[40, 70]
     assert not inflated[40, 71]
+
+
+def test_gradient_margin_from_occupancy_linear_falloff():
+    occupancy = np.zeros((1, 5), dtype=np.int8)
+    occupancy[0, 0] = 100
+    margin = gradient_margin_from_occupancy(occupancy, margin_m=4.0, resolution=1.0)
+    np.testing.assert_allclose(margin[0], [1.0, 0.75, 0.5, 0.25, 0.0])
+
+
+def test_gradient_margin_from_occupancy_no_occupied_cells():
+    occupancy = np.zeros((4, 4), dtype=np.int8)
+    margin = gradient_margin_from_occupancy(occupancy, margin_m=2.0, resolution=0.5)
+    assert margin.shape == occupancy.shape
+    assert not margin.any()

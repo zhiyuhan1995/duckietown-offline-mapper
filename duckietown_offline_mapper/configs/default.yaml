@@ -86,6 +86,7 @@ occupancy:
   preview_resolution: 0.01
   robot_radius: 0.085
   safety_margin: 0.025
+  gradient_margin_m: 0.15
   unknown_as_occupied: false
 
 export:
