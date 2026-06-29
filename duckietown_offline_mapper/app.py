@@ -647,6 +647,210 @@ def _point_cloud_figure(
     return fig
 
 
+def _load_ros_map_for_world_view(map_yaml_path: str | Path) -> dict:
+    yaml_path = Path(map_yaml_path)
+    map_data = load_yaml(yaml_path)
+    image_path = Path(str(map_data.get("image", "")))
+    if not image_path.is_absolute():
+        image_path = yaml_path.parent / image_path
+    resolution = float(map_data["resolution"])
+    origin = map_data.get("origin", [0.0, 0.0, 0.0])
+    x_min = float(origin[0])
+    y_min = float(origin[1])
+    yaw = float(origin[2]) if len(origin) > 2 else 0.0
+    image = _load_rgb_image(str(image_path), image_path.stat().st_mtime)
+    height, width = image.shape[:2]
+    x_max = x_min + float(width) * resolution
+    y_max = y_min + float(height) * resolution
+    return {
+        "map_yaml": str(yaml_path),
+        "image_path": str(image_path),
+        "image": image,
+        "resolution": resolution,
+        "origin": [x_min, y_min, yaw],
+        "bounds": [x_min, x_max, y_min, y_max],
+        "size": [int(width), int(height)],
+        "metadata": map_data,
+    }
+
+
+def _control_points_for_world_view(metadata_path: str | Path, config: dict) -> list[dict]:
+    path = Path(metadata_path)
+    if path.exists():
+        data = load_yaml(path)
+        control_points = data.get("reconstruction_to_map_transform", {}).get("control_points", [])
+        if control_points:
+            return control_points
+    return list(config.get("alignment", {}).get("control_points", []))
+
+
+def _world_map_figure(
+    map_info: dict,
+    control_points: list[dict],
+    height_px: int,
+    grid_spacing_m: float,
+    padding_m: float,
+    show_axes: bool,
+    show_control_points: bool,
+):
+    import plotly.graph_objects as go
+
+    image = map_info["image"]
+    resolution = float(map_info["resolution"])
+    x_min, x_max, y_min, y_max = [float(v) for v in map_info["bounds"]]
+    view_x_min = x_min - padding_m
+    view_x_max = x_max + padding_m
+    view_y_min = y_min - padding_m
+    view_y_max = y_max + padding_m
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Image(
+            z=image,
+            x0=x_min,
+            y0=y_max,
+            dx=resolution,
+            dy=-resolution,
+            name="map.png",
+            hovertemplate="x=%{x:.3f} m<br>y=%{y:.3f} m<extra>map.png</extra>",
+        )
+    )
+
+    shapes = [
+        {
+            "type": "rect",
+            "xref": "x",
+            "yref": "y",
+            "x0": x_min,
+            "x1": x_max,
+            "y0": y_min,
+            "y1": y_max,
+            "line": {"color": "#38bdf8", "width": 2},
+            "fillcolor": "rgba(0,0,0,0)",
+        }
+    ]
+    if show_axes:
+        if view_y_min <= 0.0 <= view_y_max:
+            shapes.append(
+                {
+                    "type": "line",
+                    "xref": "x",
+                    "yref": "y",
+                    "x0": view_x_min,
+                    "x1": view_x_max,
+                    "y0": 0.0,
+                    "y1": 0.0,
+                    "line": {"color": "#ef4444", "width": 3},
+                }
+            )
+        if view_x_min <= 0.0 <= view_x_max:
+            shapes.append(
+                {
+                    "type": "line",
+                    "xref": "x",
+                    "yref": "y",
+                    "x0": 0.0,
+                    "x1": 0.0,
+                    "y0": view_y_min,
+                    "y1": view_y_max,
+                    "line": {"color": "#22c55e", "width": 3},
+                }
+            )
+
+    fig.update_layout(shapes=shapes)
+
+    if show_axes:
+        fig.add_trace(
+            go.Scatter(
+                x=[0.0],
+                y=[0.0],
+                mode="markers+text",
+                marker={"size": 12, "color": "#f59e0b", "line": {"color": "#111827", "width": 1}},
+                text=["world (0,0)"],
+                textposition="top right",
+                name="world origin",
+                hovertemplate="world origin<br>x=0.000 m<br>y=0.000 m<extra></extra>",
+            )
+        )
+        fig.add_annotation(
+            x=min(view_x_max, 1.0),
+            y=0.0,
+            ax=0.0,
+            ay=0.0,
+            xref="x",
+            yref="y",
+            axref="x",
+            ayref="y",
+            text="+x",
+            showarrow=True,
+            arrowhead=3,
+            arrowwidth=2,
+            arrowcolor="#ef4444",
+            font={"color": "#ef4444"},
+        )
+        fig.add_annotation(
+            x=0.0,
+            y=min(view_y_max, 1.0),
+            ax=0.0,
+            ay=0.0,
+            xref="x",
+            yref="y",
+            axref="x",
+            ayref="y",
+            text="+y",
+            showarrow=True,
+            arrowhead=3,
+            arrowwidth=2,
+            arrowcolor="#22c55e",
+            font={"color": "#22c55e"},
+        )
+
+    if show_control_points and control_points:
+        target_xy = np.array([p["target"][:2] for p in control_points if len(p.get("target", [])) >= 2], dtype=np.float64)
+        if target_xy.size:
+            labels = [f"target {i}" for i in range(len(target_xy))]
+            fig.add_trace(
+                go.Scatter(
+                    x=target_xy[:, 0],
+                    y=target_xy[:, 1],
+                    mode="markers+text",
+                    marker={"size": 12, "color": "#a855f7", "symbol": "x", "line": {"width": 2}},
+                    text=labels,
+                    textposition="top center",
+                    name="alignment targets",
+                    hovertemplate="%{text}<br>x=%{x:.3f} m<br>y=%{y:.3f} m<extra></extra>",
+                )
+            )
+
+    fig.update_xaxes(
+        title="x (m)",
+        range=[view_x_min, view_x_max],
+        constrain="domain",
+        gridcolor="rgba(148, 163, 184, 0.35)",
+        zeroline=False,
+        dtick=float(grid_spacing_m),
+    )
+    fig.update_yaxes(
+        title="y (m)",
+        range=[view_y_min, view_y_max],
+        scaleanchor="x",
+        scaleratio=1,
+        gridcolor="rgba(148, 163, 184, 0.35)",
+        zeroline=False,
+        dtick=float(grid_spacing_m),
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        height=int(height_px),
+        margin={"l": 0, "r": 0, "t": 12, "b": 0},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        hovermode="closest",
+        dragmode="pan",
+        uirevision="world-map-viewer",
+    )
+    return fig
+
+
 tabs = st.tabs(
     [
         "Input",
@@ -657,6 +861,7 @@ tabs = st.tabs(
         "BEV",
         "Semantic",
         "Occupancy",
+        "World Map",
         "Export",
     ]
 )
@@ -1474,6 +1679,71 @@ with tabs[7]:
             st.info("Press Run occupancy preview to compute the occupancy map.")
 
 with tabs[8]:
+    st.header("Output Map In World Coordinates")
+    output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
+    default_map_yaml = output_dir / "map.yaml"
+    default_map_metadata = output_dir / "map_metadata.yaml"
+    map_yaml_path = st.text_input("ROS map YAML", value=str(default_map_yaml), key="world_map_yaml_path")
+    map_metadata_path = st.text_input("Map metadata", value=str(default_map_metadata), key="world_map_metadata_path")
+
+    c1, c2, c3, c4 = st.columns(4)
+    world_view_height = c1.slider("Viewer height", 520, 1100, 760, 20)
+    world_grid_spacing = c2.slider("Grid spacing (m)", 0.05, 1.0, 0.25, 0.05)
+    world_padding = c3.slider("Padding (m)", 0.0, 2.0, 0.20, 0.05)
+    show_world_axes = c4.checkbox("Show world axes", value=True)
+    show_world_control = st.checkbox("Show alignment target control points", value=True)
+
+    map_yaml = Path(map_yaml_path)
+    if not map_yaml.exists():
+        st.warning(f"Map YAML not found: {map_yaml_path}. Run full export first.")
+    else:
+        try:
+            map_info = _load_ros_map_for_world_view(map_yaml)
+            control_points = _control_points_for_world_view(map_metadata_path, config)
+            x_min, x_max, y_min, y_max = [float(v) for v in map_info["bounds"]]
+            target_checks = []
+            for i, point in enumerate(control_points):
+                target = point.get("target", [])
+                if len(target) >= 2:
+                    tx, ty = float(target[0]), float(target[1])
+                    target_checks.append(
+                        {
+                            "point": i,
+                            "target_xy": [round(tx, 4), round(ty, 4)],
+                            "inside_map_bounds": bool(x_min <= tx <= x_max and y_min <= ty <= y_max),
+                        }
+                    )
+            st.write(
+                {
+                    "map_yaml": str(map_yaml),
+                    "image": map_info["image_path"],
+                    "resolution_m_per_pixel": float(map_info["resolution"]),
+                    "image_size_px": map_info["size"],
+                    "world_bounds_m": {
+                        "x_min": x_min,
+                        "x_max": x_max,
+                        "y_min": y_min,
+                        "y_max": y_max,
+                    },
+                    "origin_lower_left_xy_yaw": map_info["origin"],
+                    "display_convention": "ROS/map view: +x right, +y up",
+                    "alignment_targets": target_checks,
+                }
+            )
+            fig = _world_map_figure(
+                map_info,
+                control_points,
+                int(world_view_height),
+                float(world_grid_spacing),
+                float(world_padding),
+                bool(show_world_axes),
+                bool(show_world_control),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as exc:
+            st.error(str(exc))
+
+with tabs[9]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))
     config["export"]["map_frame"] = st.text_input("Map frame", value=config["export"].get("map_frame", "map"))
     config_file = st.file_uploader("Optional YAML override", type=["yaml", "yml"])

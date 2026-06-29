@@ -778,3 +778,23 @@ Date: 2026-06-29
     - `0.01 m/cell`: `308 x 293`, about `90k` cells, total about `2.26s`; first-time PLY load about `2.05s`.
     - `0.001 m/cell`: `3079 x 2925`, about `9.0M` cells, total about `0.55s` after cache with optimized inflation; old dilation was the problematic path.
   - Empty `2925 x 3079` obstacle-grid inflation returns in about `0.004s`.
+
+## World Coordinate Output Map Viewer
+
+Date: 2026-06-29
+
+- Request:
+  - Add an interface that visualizes the exported ROS occupancy map in the real-world 2D coordinate system.
+- Troubleshooting route:
+  - The planning-facing export is `map.yaml + map.png`, not the visual-only metric BEV image.
+  - `map.yaml` stores the ROS lower-left `origin` and `resolution`; `map.png` row 0 corresponds the map's upper side in a standard `+x right, +y up` ROS/map view.
+  - The current exported `map.yaml` bounds can be compared against alignment target points to quickly see whether the final export actually covers the intended real-world coordinates.
+- Fix:
+  - Added a `World Map` Streamlit tab.
+  - The tab reads a selectable `map.yaml` and resolves the referenced `map.png`.
+  - It renders the occupancy image in Plotly using world-coordinate axes, equal metric aspect ratio, map bounds, world origin axes, and optional alignment target control points.
+  - The page reports `resolution`, pixel size, world bounds, origin, and whether each alignment target lies inside the exported map bounds.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `11 passed`
+  - `.conda-vggt/bin/python duckietown_offline_mapper/app.py`: exited successfully in Streamlit bare mode.
