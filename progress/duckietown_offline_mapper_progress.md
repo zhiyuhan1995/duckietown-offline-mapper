@@ -603,3 +603,22 @@ Date: 2026-06-29
   - Local HTTP check: `200`.
   - Remote process check after restart: about `74 MB` RSS and low CPU.
   - Browser URL: `http://127.0.0.1:8501`
+
+## BEV Metric Render Limit Adjustment
+
+Date: 2026-06-29
+
+- Problem:
+  - The BEV metric renderer refused the current aligned map with `3064 x 2912` pixels at `1000 px/m`.
+  - Root cause: the safety cap was set to `8 MP`, while the current map requires about `8.92 MP`.
+- Fix:
+  - Raised the explicit-render safety cap to `32 MP`.
+  - Added `metric_megapixels` and `metric_render_limit_megapixels` to the BEV page diagnostic block.
+  - Kept rendering behind the explicit `Render metric aligned map` button so Streamlit does not recompute large images on every rerun.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2329520`.
+  - Local HTTP check: `200`.
+  - Remote process check after restart: about `74 MB` RSS and low CPU.
+  - Browser URL: `http://127.0.0.1:8501`

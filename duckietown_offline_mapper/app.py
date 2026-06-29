@@ -255,9 +255,11 @@ def _render_metric_aligned_map(
     y_span = max(y_max - y_min, float(metadata.resolution))
     width = max(1, int(np.ceil(x_span * ppm)))
     height = max(1, int(np.ceil(y_span * ppm)))
-    if width * height > 8_000_000:
+    max_metric_pixels = 32_000_000
+    if width * height > max_metric_pixels:
         raise ValueError(
-            f"Metric view would be too large: {width} x {height} pixels. "
+            f"Metric view would be too large: {width} x {height} pixels "
+            f"({width * height / 1_000_000:.2f} MP, limit {max_metric_pixels / 1_000_000:.0f} MP). "
             "Crop the ROI or use tighter alignment bounds before rendering at 1000 px/m."
         )
 
@@ -1020,6 +1022,8 @@ with tabs[5]:
                 {
                     "pixels_per_meter": 1000,
                     "metric_image_size": [int(expected_width), int(expected_height)],
+                    "metric_megapixels": round(float(expected_width * expected_height) / 1_000_000.0, 2),
+                    "metric_render_limit_megapixels": 32,
                     "origin_pixel": [int(expected_width - 1), int(expected_height - 1)],
                     "lower_right_world_xy": [float(metadata.x_min), float(metadata.y_min)],
                     "upper_left_world_xy": [float(metadata.x_max), float(metadata.y_max)],
