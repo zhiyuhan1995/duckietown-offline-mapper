@@ -798,3 +798,36 @@ Date: 2026-06-29
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `11 passed`
   - `.conda-vggt/bin/python duckietown_offline_mapper/app.py`: exited successfully in Streamlit bare mode.
+
+## Metric BEV Bad Source Regression Fix
+
+Date: 2026-06-29
+
+- Problem:
+  - The BEV page's metric aligned map again rendered the track in the wrong area / wrong world extent.
+  - The visible PNG was generated from outputs with bounds around `x=-0.77..0.62`, `y=-1.51..-0.18`, so it could not cover the intended target coordinates `(0,0)`, `(2,0)`, `(0,2.4)`.
+- Root cause:
+  - The three values previously put into default `alignment.control_points.source` were already map-frame coordinates from an aligned view.
+  - Full export needs source points in the ground-aligned pre-map reconstruction frame, with target points in the real-world map frame.
+  - Because source and target were nearly identical, the estimated transform became almost identity and the export fell back to the raw reconstruction extent.
+  - The BEV page also preferred stale `alignment_ground_texture` and stale `metric_aligned_map...png` files if they existed on disk.
+- Fix:
+  - Restored default source control points to the raw ground-aligned frame:
+    - `(0.245707, -0.382096) -> (0, 0)`
+    - `(-0.550313, -0.441378) -> (2, 0)`
+    - `(0.317201, -1.299224) -> (0, 2.4)`
+  - Changed the Alignment tab default preview source to `Point Cloud`.
+  - Ground Texture preview is now visual-check-only and no longer creates source correspondences by click.
+  - Semantic/Occupancy default BEV source now prefers current `ground_texture/ground_texture_bev.png`, not stale metric-render PNGs.
+  - Metric BEV source selection now prefers current full-export `ground_texture` and ignores stale `alignment_ground_texture` metadata older than `run_summary.yaml`.
+  - Existing metric render PNGs are shown only if newer than the selected source image and metadata.
+- Recovery:
+  - Re-ran full export on `heracleum` GPU 1 with the fixed config.
+  - Regenerated `outputs/track_map/metric_aligned_map_world_origin_1000pxpm_v2.png`.
+  - Current recovered bounds:
+    - `map.yaml origin = [-0.6424959389440767, -0.31447475752151155, 0.0]`
+    - `x=-0.6424959389440767..2.4361079838897473`
+    - `y=-0.31447475752151155..2.610411040323589`
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `11 passed`

@@ -204,24 +204,29 @@ def _save_rgb_image(path: str | Path, image: np.ndarray) -> None:
 
 
 def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
-    metric_render = st.session_state.get("bev_metric_render")
-    if metric_render and metric_render.get("render_version") == METRIC_RENDER_VERSION:
-        path = metric_render.get("path")
-        if path and Path(path).exists():
-            return str(path)
-    metric_path = Path(config["export"].get("output_dir", "outputs/track_map")) / METRIC_RENDER_FILENAME
-    if metric_path.exists():
-        return str(metric_path)
     alignment_texture = st.session_state.get("alignment_ground_texture_preview")
     if alignment_texture:
         path = alignment_texture.get("paths", {}).get("texture")
         if path and Path(path).exists():
             return str(path)
+    output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
+    ground_texture = output_dir / "ground_texture" / "ground_texture_bev.png"
+    if ground_texture.exists():
+        return str(ground_texture)
     if last_run:
         path = last_run.get("paths", {}).get("bev_rgb")
         if path:
             return str(path)
-    return str(Path(config["export"].get("output_dir", "outputs/track_map")) / "bev_rgb.png")
+    return str(output_dir / "bev_rgb.png")
+
+
+def _is_file_fresh_enough(path: Path, reference_paths: list[Path]) -> bool:
+    if not path.exists():
+        return False
+    existing_refs = [ref for ref in reference_paths if ref.exists()]
+    if not existing_refs:
+        return True
+    return path.stat().st_mtime >= max(ref.stat().st_mtime for ref in existing_refs)
 
 
 def _latest_metric_render_source_paths(config: dict, last_run: dict | None) -> tuple[str, str]:
@@ -233,18 +238,20 @@ def _latest_metric_render_source_paths(config: dict, last_run: dict | None) -> t
             return str(texture_path), str(metadata_path)
 
     output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
+    run_summary = output_dir / "run_summary.yaml"
     paired_candidates = [
-        (
-            output_dir / "alignment_ground_texture" / "ground_texture_bev.png",
-            output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml",
-        ),
         (
             output_dir / "ground_texture" / "ground_texture_bev.png",
             output_dir / "ground_texture" / "ground_texture_metadata.yaml",
         ),
+        (
+            output_dir / "alignment_ground_texture" / "ground_texture_bev.png",
+            output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml",
+        ),
     ]
     for texture_path, metadata_path in paired_candidates:
-        if texture_path.exists() and metadata_path.exists():
+        references = [run_summary] if "alignment_ground_texture" in texture_path.parts else []
+        if texture_path.exists() and metadata_path.exists() and _is_file_fresh_enough(metadata_path, references):
             return str(texture_path), str(metadata_path)
 
     if last_run:
@@ -1057,12 +1064,16 @@ with tabs[3]:
     st.subheader("Planar Control Points")
     alignment_preview_source = st.radio(
         "Alignment preview source",
-        ["Ground Texture", "Point Cloud"],
+        ["Point Cloud", "Ground Texture"],
         horizontal=True,
         key="alignment_preview_source",
     )
 
     if alignment_preview_source == "Ground Texture":
+        st.info(
+            "Ground Texture is already rendered in the current map frame, so use it for visual checking only. "
+            "Create source control points from the Point Cloud view, which uses the ground-aligned pre-map coordinates."
+        )
         ground_texture_config = config.setdefault("ground_texture", {})
         alignment_run_summary_path = st.text_input(
             "Run summary for IPM",
@@ -1192,14 +1203,7 @@ with tabs[3]:
                 f"Regenerated IPM texture {texture_rgb.shape[1]} x {texture_rgb.shape[0]} "
                 f"from {alignment_run_summary_path}. Output: {preview_state['paths']['texture']}"
             )
-            if streamlit_image_coordinates:
-                click = streamlit_image_coordinates(display_rgb, key="alignment_texture_click")
-                if click:
-                    x, y = _bev_display_pixel_to_world(float(click["x"]), float(click["y"]), display_rgb, alignment_metadata)
-                    st.session_state.alignment_pending_source = [float(x), float(y), 0.0]
-            else:
-                st.image(display_rgb, caption="Ground texture source plane")
-                st.warning("Install streamlit-image-coordinates to click the BEV image directly.")
+            st.image(display_rgb, caption="Ground texture in the current map frame", use_container_width=False)
         else:
             st.warning(f"Run summary not found: {alignment_run_summary_path}")
     else:
@@ -1275,7 +1279,8 @@ with tabs[3]:
         st.rerun()
 
     st.subheader("Control Correspondences")
-    if st.button("Reset to default correspondences"):
+    st.caption("Source points are in the ground-aligned pre-map coordinate frame; target points are the real-world map coordinates.")
+    if st.button("Reset to default raw-source correspondences"):
         st.session_state.alignment_control_points = list(_load_default_config()["alignment"].get("control_points", []))
         config["alignment"]["control_points"] = list(st.session_state.alignment_control_points)
         st.session_state.alignment_pending_source = None
@@ -1418,7 +1423,10 @@ with tabs[5]:
                 else:
                     st.image(render_info["path"], caption="Metric aligned map view", use_container_width=False)
             elif metric_output_path.exists():
-                st.image(str(metric_output_path), caption="Metric aligned map view", use_container_width=False)
+                if _is_file_fresh_enough(metric_output_path, [bev_path, metadata_path]):
+                    st.image(str(metric_output_path), caption="Metric aligned map view", use_container_width=False)
+                else:
+                    st.warning("Existing metric map PNG is older than the selected source. Press Render metric aligned map to refresh it.")
             else:
                 st.info("Press Render metric aligned map to generate the fixed-scale view.")
         except Exception as exc:
