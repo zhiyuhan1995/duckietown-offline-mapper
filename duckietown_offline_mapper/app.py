@@ -236,6 +236,21 @@ def _metadata_from_map_yaml(path: str | Path):
     )
 
 
+def _metric_view_shape(metadata, pixels_per_meter: int = 1000) -> tuple[int, int]:
+    ppm = int(pixels_per_meter)
+    x_span = max(float(metadata.x_max) - float(metadata.x_min), float(metadata.resolution))
+    y_span = max(float(metadata.y_max) - float(metadata.y_min), float(metadata.resolution))
+    return max(1, int(np.ceil(x_span * ppm))), max(1, int(np.ceil(y_span * ppm)))
+
+
+def _world_to_metric_view_pixel(x: float, y: float, metadata, pixels_per_meter: int = 1000) -> tuple[float, float]:
+    width, height = _metric_view_shape(metadata, pixels_per_meter)
+    ppm = float(pixels_per_meter)
+    u = width - 0.5 - (float(x) - float(metadata.x_min)) * ppm
+    v = height - 0.5 - (float(y) - float(metadata.y_min)) * ppm
+    return float(u), float(v)
+
+
 def _render_metric_aligned_map(
     bev_rgb: np.ndarray,
     metadata,
@@ -251,10 +266,7 @@ def _render_metric_aligned_map(
     x_max = float(metadata.x_max)
     y_min = float(metadata.y_min)
     y_max = float(metadata.y_max)
-    x_span = max(x_max - x_min, float(metadata.resolution))
-    y_span = max(y_max - y_min, float(metadata.resolution))
-    width = max(1, int(np.ceil(x_span * ppm)))
-    height = max(1, int(np.ceil(y_span * ppm)))
+    width, height = _metric_view_shape(metadata, ppm)
     max_metric_pixels = 32_000_000
     if width * height > max_metric_pixels:
         raise ValueError(
@@ -293,16 +305,23 @@ def _render_metric_aligned_map(
         try:
             import cv2  # type: ignore
 
-            origin = (width - 1, height - 1)
-            x_end = (max(0, width - 1 - min(ppm, width - 1)), height - 1)
-            y_end = (width - 1, max(0, height - 1 - min(ppm, height - 1)))
-            cv2.line(rendered, origin, x_end, (255, 64, 64), 3, cv2.LINE_AA)
-            cv2.line(rendered, origin, y_end, (64, 220, 64), 3, cv2.LINE_AA)
-            cv2.circle(rendered, origin, 7, (255, 255, 255), -1, cv2.LINE_AA)
-            cv2.circle(rendered, origin, 5, (255, 64, 64), -1, cv2.LINE_AA)
+            origin_u, origin_v = _world_to_metric_view_pixel(0.0, 0.0, metadata, ppm)
+            if not (0.0 <= origin_u < width and 0.0 <= origin_v < height):
+                return rendered
+            origin = (int(round(origin_u)), int(round(origin_v)))
+            x_end = (max(0, origin[0] - min(ppm, origin[0])), origin[1])
+            y_end = (origin[0], max(0, origin[1] - min(ppm, origin[1])))
+            cv2.arrowedLine(rendered, origin, x_end, (255, 64, 64), 3, cv2.LINE_AA, tipLength=0.04)
+            cv2.arrowedLine(rendered, origin, y_end, (64, 220, 64), 3, cv2.LINE_AA, tipLength=0.04)
+            cv2.circle(rendered, origin, 9, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(rendered, origin, 6, (0, 180, 255), -1, cv2.LINE_AA)
+            cv2.drawMarker(rendered, origin, (0, 0, 0), cv2.MARKER_CROSS, 24, 2, cv2.LINE_AA)
             if width > 180 and height > 80:
-                cv2.putText(rendered, "+x 1m", (max(4, x_end[0] + 8), max(18, height - 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 64, 64), 2, cv2.LINE_AA)
-                cv2.putText(rendered, "+y 1m", (max(4, width - 90), max(22, y_end[1] + 22)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (64, 220, 64), 2, cv2.LINE_AA)
+                label_x = min(width - 170, max(4, origin[0] + 12))
+                label_y = min(height - 10, max(22, origin[1] - 12))
+                cv2.putText(rendered, "world (0,0)", (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 180, 255), 2, cv2.LINE_AA)
+                cv2.putText(rendered, "+x 1m", (max(4, x_end[0] + 8), min(height - 12, max(18, x_end[1] + 22))), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 64, 64), 2, cv2.LINE_AA)
+                cv2.putText(rendered, "+y 1m", (min(width - 90, max(4, y_end[0] + 10)), max(22, y_end[1] + 22)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (64, 220, 64), 2, cv2.LINE_AA)
         except Exception:
             pass
     return rendered
@@ -995,7 +1014,7 @@ with tabs[5]:
             st.error(str(exc))
     last = st.session_state.get("last_run")
     st.subheader("Metric Aligned Map")
-    st.caption("Fixed display convention: lower-right is the local display origin, +x points left, +y points up, 1000 pixels = 1 m.")
+    st.caption("Fixed display convention: +x points left, +y points up, 1000 pixels = 1 m. The yellow marker is the world origin (0,0).")
     metric_bev_path = st.text_input(
         "Aligned BEV image",
         value=_latest_bev_rgb_path(config, last),
@@ -1006,7 +1025,7 @@ with tabs[5]:
         value=_latest_output_path(config, last, "map_metadata", "map_metadata.yaml"),
         key="bev_metric_metadata_path",
     )
-    draw_metric_axes = st.checkbox("Show origin / 1m axes", value=True, key="bev_metric_axes")
+    draw_metric_axes = st.checkbox("Show world origin / 1m axes", value=True, key="bev_metric_axes")
     bev_path = Path(metric_bev_path)
     metadata_path = Path(metric_metadata_path)
     missing = [str(path) for path in [bev_path, metadata_path] if not path.exists()]
@@ -1015,16 +1034,23 @@ with tabs[5]:
     else:
         try:
             metadata = _metadata_from_map_yaml(metadata_path)
-            expected_width = max(1, int(np.ceil(max(float(metadata.x_max) - float(metadata.x_min), float(metadata.resolution)) * 1000)))
-            expected_height = max(1, int(np.ceil(max(float(metadata.y_max) - float(metadata.y_min), float(metadata.resolution)) * 1000)))
-            metric_output_path = Path(config["export"].get("output_dir", "outputs/track_map")) / "metric_aligned_map_1000pxpm.png"
+            expected_width, expected_height = _metric_view_shape(metadata, 1000)
+            origin_u, origin_v = _world_to_metric_view_pixel(0.0, 0.0, metadata, 1000)
+            origin_inside = 0.0 <= origin_u < expected_width and 0.0 <= origin_v < expected_height
+            metric_output_path = Path(config["export"].get("output_dir", "outputs/track_map")) / "metric_aligned_map_world_origin_1000pxpm.png"
             st.write(
                 {
                     "pixels_per_meter": 1000,
                     "metric_image_size": [int(expected_width), int(expected_height)],
                     "metric_megapixels": round(float(expected_width * expected_height) / 1_000_000.0, 2),
                     "metric_render_limit_megapixels": 32,
-                    "origin_pixel": [int(expected_width - 1), int(expected_height - 1)],
+                    "world_origin_pixel_xy": [round(float(origin_u), 1), round(float(origin_v), 1)],
+                    "world_origin_inside_image": bool(origin_inside),
+                    "world_origin_offset_from_lower_right_m": [
+                        round(float(0.0 - metadata.x_min), 4),
+                        round(float(0.0 - metadata.y_min), 4),
+                    ],
+                    "lower_right_pixel_xy": [int(expected_width - 1), int(expected_height - 1)],
                     "lower_right_world_xy": [float(metadata.x_min), float(metadata.y_min)],
                     "upper_left_world_xy": [float(metadata.x_max), float(metadata.y_max)],
                     "x_axis": "+x is horizontal left",
@@ -1050,6 +1076,7 @@ with tabs[5]:
                     "metadata_path": str(metadata_path),
                     "metadata_mtime": float(metadata_path.stat().st_mtime),
                     "draw_axes": bool(draw_metric_axes),
+                    "render_version": "world-origin-axes-v1",
                 }
                 st.success(f"Rendered metric map: {metric_output_path}")
 
@@ -1061,6 +1088,7 @@ with tabs[5]:
                     or float(render_info.get("bev_mtime", -1.0)) != float(bev_path.stat().st_mtime)
                     or float(render_info.get("metadata_mtime", -1.0)) != float(metadata_path.stat().st_mtime)
                     or bool(render_info.get("draw_axes", True)) != bool(draw_metric_axes)
+                    or render_info.get("render_version") != "world-origin-axes-v1"
                 )
                 if stale:
                     st.warning("The displayed metric map was rendered from older inputs. Press Render metric aligned map to refresh it.")

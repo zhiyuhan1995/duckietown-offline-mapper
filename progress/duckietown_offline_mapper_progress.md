@@ -622,3 +622,24 @@ Date: 2026-06-29
   - Local HTTP check: `200`.
   - Remote process check after restart: about `74 MB` RSS and low CPU.
   - Browser URL: `http://127.0.0.1:8501`
+
+## BEV Metric World Origin Marker
+
+Date: 2026-06-29
+
+- Problem:
+  - The BEV metric map directions were aligned to the real-world axes, but the drawn 1 m axes started from the lower-right image corner.
+  - That corner is the lower-right extent of the rendered image, not necessarily the real-world `(0,0)` origin.
+  - For the current Alignment IPM metadata, `(0,0)` is about `0.6290 m` left and `0.3159 m` up from the lower-right corner, at pixel approximately `(2434.5, 2595.6)` in a `3064 x 2912` image.
+- Fix:
+  - Added metric-view helpers for image shape and world-to-display pixel conversion.
+  - Changed the axis overlay to draw from the actual world origin `(0,0)` when it lies inside the current map extent.
+  - Renamed the UI diagnostics from ambiguous `origin_pixel` to `world_origin_pixel_xy` and `lower_right_pixel_xy`.
+  - The metric render output filename now uses `metric_aligned_map_world_origin_1000pxpm.png` so old lower-right-origin overlays are not reused accidentally.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2363184`.
+  - Local HTTP check: `200`.
+  - Remote process check after restart: about `75 MB` RSS and low CPU.
+  - Browser URL: `http://127.0.0.1:8501`
