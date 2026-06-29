@@ -726,3 +726,25 @@ Date: 2026-06-29
   - Local HTTP check: `200`.
   - Remote process check after restart: about `75 MB` RSS and low CPU.
   - Browser URL: `http://127.0.0.1:8501`
+
+## Metric BEV Double-Render Source Fix
+
+Date: 2026-06-29
+
+- Problem:
+  - The BEV page's `Metric Aligned Map` became visibly unaligned: the actual track texture was pushed into the upper-right corner while the world-origin axes were in the lower area.
+  - Root cause: after downstream pages were changed to prefer the metric aligned BEV, the BEV page reused the same `_latest_bev_rgb_path(...)` helper for its render input.
+  - That caused the metric renderer to take an already metric-aligned output PNG as its input and render it a second time.
+- Fix:
+  - Split BEV metric render inputs from downstream BEV sources.
+  - Added `_latest_metric_render_source_paths(...)`, which prefers the paired Alignment IPM source image and metadata.
+  - If the BEV render input textbox still contains an old `metric_aligned_map...` output path, the app resets it back to the Alignment source image.
+  - Bumped metric render output to `metric_aligned_map_world_origin_1000pxpm_v2.png` and render version `world-origin-axes-v2` so the bad old PNG is not reused.
+  - Stale render-info now warns without displaying old stale images.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `9 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2424663`.
+  - Local HTTP check: `200`.
+  - Remote process check after restart: about `75 MB` RSS and low CPU.
+  - Browser URL: `http://127.0.0.1:8501`

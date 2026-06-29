@@ -37,8 +37,8 @@ config = st.session_state.config
 
 METRIC_PIXELS_PER_METER = 1000
 METRIC_RENDER_LIMIT_PIXELS = 32_000_000
-METRIC_RENDER_VERSION = "world-origin-axes-v1"
-METRIC_RENDER_FILENAME = "metric_aligned_map_world_origin_1000pxpm.png"
+METRIC_RENDER_VERSION = "world-origin-axes-v2"
+METRIC_RENDER_FILENAME = "metric_aligned_map_world_origin_1000pxpm_v2.png"
 PREVIEW_DISPLAY_WIDTH = 1400
 
 
@@ -221,6 +221,40 @@ def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
         if path:
             return str(path)
     return str(Path(config["export"].get("output_dir", "outputs/track_map")) / "bev_rgb.png")
+
+
+def _latest_metric_render_source_paths(config: dict, last_run: dict | None) -> tuple[str, str]:
+    alignment_texture = st.session_state.get("alignment_ground_texture_preview")
+    if alignment_texture:
+        texture_path = alignment_texture.get("paths", {}).get("texture")
+        metadata_path = alignment_texture.get("paths", {}).get("metadata")
+        if texture_path and metadata_path and Path(texture_path).exists() and Path(metadata_path).exists():
+            return str(texture_path), str(metadata_path)
+
+    output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
+    paired_candidates = [
+        (
+            output_dir / "alignment_ground_texture" / "ground_texture_bev.png",
+            output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml",
+        ),
+        (
+            output_dir / "ground_texture" / "ground_texture_bev.png",
+            output_dir / "ground_texture" / "ground_texture_metadata.yaml",
+        ),
+    ]
+    for texture_path, metadata_path in paired_candidates:
+        if texture_path.exists() and metadata_path.exists():
+            return str(texture_path), str(metadata_path)
+
+    if last_run:
+        path = last_run.get("paths", {}).get("bev_rgb")
+        if path:
+            return str(path), _latest_output_path(config, last_run, "map_metadata", "map_metadata.yaml")
+    return str(output_dir / "bev_rgb.png"), _latest_output_path(config, last_run, "map_metadata", "map_metadata.yaml")
+
+
+def _looks_like_metric_render_output_path(path: str | Path) -> bool:
+    return Path(path).name.startswith("metric_aligned_map")
 
 
 def _is_metric_aligned_bev_path(path: str | Path, config: dict) -> bool:
@@ -1062,14 +1096,21 @@ with tabs[5]:
     last = st.session_state.get("last_run")
     st.subheader("Metric Aligned Map")
     st.caption("Fixed display convention: +x points left, +y points up, 1000 pixels = 1 m. The yellow marker is the world origin (0,0).")
+    default_metric_bev_path, default_metric_metadata_path = _latest_metric_render_source_paths(config, last)
+    if _looks_like_metric_render_output_path(st.session_state.get("bev_metric_rgb_path", "")):
+        st.session_state.bev_metric_rgb_path = default_metric_bev_path
+    if not Path(st.session_state.get("bev_metric_rgb_path", default_metric_bev_path)).exists():
+        st.session_state.bev_metric_rgb_path = default_metric_bev_path
+    if not Path(st.session_state.get("bev_metric_metadata_path", default_metric_metadata_path)).exists():
+        st.session_state.bev_metric_metadata_path = default_metric_metadata_path
     metric_bev_path = st.text_input(
-        "Aligned BEV image",
-        value=_latest_bev_rgb_path(config, last),
+        "Aligned BEV source image",
+        value=default_metric_bev_path,
         key="bev_metric_rgb_path",
     )
     metric_metadata_path = st.text_input(
-        "Aligned map metadata",
-        value=_latest_output_path(config, last, "map_metadata", "map_metadata.yaml"),
+        "Aligned source metadata",
+        value=default_metric_metadata_path,
         key="bev_metric_metadata_path",
     )
     draw_metric_axes = st.checkbox("Show world origin / 1m axes", value=True, key="bev_metric_axes")
@@ -1139,7 +1180,8 @@ with tabs[5]:
                 )
                 if stale:
                     st.warning("The displayed metric map was rendered from older inputs. Press Render metric aligned map to refresh it.")
-                st.image(render_info["path"], caption="Metric aligned map view", use_container_width=False)
+                else:
+                    st.image(render_info["path"], caption="Metric aligned map view", use_container_width=False)
             elif metric_output_path.exists():
                 st.image(str(metric_output_path), caption="Metric aligned map view", use_container_width=False)
             else:
