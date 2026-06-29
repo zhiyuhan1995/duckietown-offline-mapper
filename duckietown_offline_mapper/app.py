@@ -208,7 +208,8 @@ def _latest_output_path(config: dict, last_run: dict | None, key: str, filename:
 
 
 def _metadata_from_map_yaml(path: str | Path):
-    meta = load_yaml(path)
+    data = load_yaml(path)
+    meta = data.get("metadata", data)
     return metadata_from_bounds(
         float(meta["x_min"]),
         float(meta["x_max"]),
@@ -217,6 +218,73 @@ def _metadata_from_map_yaml(path: str | Path):
         float(meta["resolution"]),
         str(meta.get("frame_id", "map")),
     )
+
+
+def _render_metric_aligned_map(
+    bev_rgb: np.ndarray,
+    metadata,
+    pixels_per_meter: int = 1000,
+    unknown_rgb: tuple[int, int, int] = (80, 80, 80),
+    draw_axes: bool = True,
+) -> np.ndarray:
+    ppm = int(pixels_per_meter)
+    if ppm <= 0:
+        raise ValueError("pixels_per_meter must be positive")
+
+    x_min = float(metadata.x_min)
+    x_max = float(metadata.x_max)
+    y_min = float(metadata.y_min)
+    y_max = float(metadata.y_max)
+    x_span = max(x_max - x_min, float(metadata.resolution))
+    y_span = max(y_max - y_min, float(metadata.resolution))
+    width = max(1, int(np.ceil(x_span * ppm)))
+    height = max(1, int(np.ceil(y_span * ppm)))
+    if width * height > 40_000_000:
+        raise ValueError(f"Metric view would be too large: {width} x {height} pixels")
+
+    xs = x_min + (width - 1 - np.arange(width, dtype=np.float32) + 0.5) / float(ppm)
+    ys = y_min + (height - 1 - np.arange(height, dtype=np.float32) + 0.5) / float(ppm)
+    src_x = ((xs[None, :] - x_min) / float(metadata.resolution) - 0.5).astype(np.float32)
+    src_y = ((y_max - ys[:, None]) / float(metadata.resolution) - 0.5).astype(np.float32)
+    map_x = np.broadcast_to(src_x, (height, width)).copy()
+    map_y = np.broadcast_to(src_y, (height, width)).copy()
+
+    try:
+        import cv2  # type: ignore
+
+        rendered = cv2.remap(
+            np.asarray(bev_rgb, dtype=np.uint8),
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=tuple(int(c) for c in unknown_rgb),
+        )
+    except Exception:
+        uu = np.rint(map_x).astype(int)
+        vv = np.rint(map_y).astype(int)
+        rendered = np.full((height, width, 3), unknown_rgb, dtype=np.uint8)
+        valid = (uu >= 0) & (uu < bev_rgb.shape[1]) & (vv >= 0) & (vv < bev_rgb.shape[0])
+        rendered[valid] = bev_rgb[vv[valid], uu[valid]]
+
+    if draw_axes:
+        rendered = rendered.copy()
+        try:
+            import cv2  # type: ignore
+
+            origin = (width - 1, height - 1)
+            x_end = (max(0, width - 1 - min(ppm, width - 1)), height - 1)
+            y_end = (width - 1, max(0, height - 1 - min(ppm, height - 1)))
+            cv2.line(rendered, origin, x_end, (255, 64, 64), 3, cv2.LINE_AA)
+            cv2.line(rendered, origin, y_end, (64, 220, 64), 3, cv2.LINE_AA)
+            cv2.circle(rendered, origin, 7, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(rendered, origin, 5, (255, 64, 64), -1, cv2.LINE_AA)
+            if width > 180 and height > 80:
+                cv2.putText(rendered, "+x 1m", (max(4, x_end[0] + 8), max(18, height - 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 64, 64), 2, cv2.LINE_AA)
+                cv2.putText(rendered, "+y 1m", (max(4, width - 90), max(22, y_end[1] + 22)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (64, 220, 64), 2, cv2.LINE_AA)
+        except Exception:
+            pass
+    return rendered
 
 
 def _obstacle_grid_from_aligned_height(cloud: PointCloud, metadata, height_threshold: float) -> np.ndarray:
@@ -902,6 +970,51 @@ with tabs[5]:
                 res = _run_pipeline_subprocess(config)
             st.session_state.last_run = res
             st.image(res["paths"]["bev_rgb"], use_container_width=True)
+        except Exception as exc:
+            st.error(str(exc))
+    last = st.session_state.get("last_run")
+    st.subheader("Metric Aligned Map")
+    st.caption("Fixed display convention: lower-right is the local display origin, +x points left, +y points up, 1000 pixels = 1 m.")
+    metric_bev_path = st.text_input(
+        "Aligned BEV image",
+        value=_latest_bev_rgb_path(config, last),
+        key="bev_metric_rgb_path",
+    )
+    metric_metadata_path = st.text_input(
+        "Aligned map metadata",
+        value=_latest_output_path(config, last, "map_metadata", "map_metadata.yaml"),
+        key="bev_metric_metadata_path",
+    )
+    draw_metric_axes = st.checkbox("Show origin / 1m axes", value=True, key="bev_metric_axes")
+    bev_path = Path(metric_bev_path)
+    metadata_path = Path(metric_metadata_path)
+    missing = [str(path) for path in [bev_path, metadata_path] if not path.exists()]
+    if missing:
+        st.warning(f"Missing metric map source files: {missing}. Run Alignment IPM, BEV preview, or full export first.")
+    else:
+        try:
+            bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+            metadata = _metadata_from_map_yaml(metadata_path)
+            metric_rgb = _render_metric_aligned_map(
+                bev_rgb,
+                metadata,
+                pixels_per_meter=1000,
+                unknown_rgb=tuple(config["bev"].get("unknown_rgb", [80, 80, 80])),
+                draw_axes=draw_metric_axes,
+            )
+            st.write(
+                {
+                    "pixels_per_meter": 1000,
+                    "metric_image_size": [int(metric_rgb.shape[1]), int(metric_rgb.shape[0])],
+                    "origin_pixel": [int(metric_rgb.shape[1] - 1), int(metric_rgb.shape[0] - 1)],
+                    "lower_right_world_xy": [float(metadata.x_min), float(metadata.y_min)],
+                    "upper_left_world_xy": [float(metadata.x_max), float(metadata.y_max)],
+                    "x_axis": "+x is horizontal left",
+                    "y_axis": "+y is vertical up",
+                    "source": {"bev_rgb": str(bev_path), "metadata": str(metadata_path)},
+                }
+            )
+            st.image(metric_rgb, caption="Metric aligned map view", use_container_width=False)
         except Exception as exc:
             st.error(str(exc))
 

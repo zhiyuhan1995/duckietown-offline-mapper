@@ -553,3 +553,28 @@ Date: 2026-06-29
   - Streamlit restarted on `heracleum`; remote PID: `2171997`.
   - Local HTTP check: `200`.
   - Browser URL: `http://127.0.0.1:8501`
+
+## BEV Metric Aligned Map View
+
+Date: 2026-06-29
+
+- Request:
+  - The BEV page should show the aligned map using a fixed metric display convention.
+  - Display convention: +y points upward, +x points leftward, 1000 pixels represent 1 m, and the local display origin is at the lower-right pixel.
+- Troubleshooting route:
+  - Checked the existing BEV tab and found it only displayed the raw raster/texture image with Streamlit's default image scaling.
+  - Checked map metadata formats and found two active schemas: `map_metadata.yaml` stores bounds at top level, while Alignment IPM texture metadata stores them under `metadata`.
+  - Added metadata parsing for both schemas so the BEV view can use either the rasterized point-cloud map or the Alignment-generated IPM texture.
+  - Avoided clipping negative map coordinates by rendering the full map extent and treating the lower-right of the rendered image as the local display origin.
+  - Used pixel-center resampling to keep the 1000 px/m display from gaining a one-pixel border or half-pixel offset.
+- Fix:
+  - Added `Metric Aligned Map` to the BEV tab.
+  - The view loads the current aligned BEV image plus aligned map metadata, resamples it to 1000 px/m, and displays it with +x left / +y up.
+  - Added optional 1 m x/y axes from the lower-right origin.
+  - The page reports image size, origin pixel, lower-right world coordinate, upper-left world coordinate, and source file paths.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2286736`.
+  - Local HTTP check: `200`.
+  - Browser URL: `http://127.0.0.1:8501`
