@@ -578,3 +578,28 @@ Date: 2026-06-29
   - Streamlit restarted on `heracleum`; remote PID: `2286736`.
   - Local HTTP check: `200`.
   - Browser URL: `http://127.0.0.1:8501`
+
+## BEV Metric View Streamlit CPU Fix
+
+Date: 2026-06-29
+
+- Problem:
+  - After adding the metric aligned BEV view, the Streamlit process on `heracleum` became unresponsive.
+  - The process reached high CPU and about 17 GB RSS, and both local and remote `curl http://127.0.0.1:8501` timed out.
+- Troubleshooting route:
+  - Checked the local tunnel and found port `8501` still forwarded.
+  - Checked `heracleum` directly and confirmed the Streamlit process itself was busy, not the tunnel.
+  - Confirmed the stuck PID needed `SIGKILL`.
+  - Identified the risky path: the BEV tab rendered and encoded the full 1000 px/m metric image automatically on every Streamlit rerun.
+- Fix:
+  - Changed metric aligned map rendering to an explicit button action.
+  - The generated metric map is saved as `metric_aligned_map_1000pxpm.png` under the export directory.
+  - Normal reruns now show metadata and the cached PNG path instead of recomputing/reserializing the large NumPy image.
+  - Lowered the metric-render pixel cap to 8 MP and return a clear ROI/cropping error if the requested fixed-scale view is too large.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `8 passed`
+  - Streamlit restarted on `heracleum`; remote PID: `2302269`.
+  - Local HTTP check: `200`.
+  - Remote process check after restart: about `74 MB` RSS and low CPU.
+  - Browser URL: `http://127.0.0.1:8501`

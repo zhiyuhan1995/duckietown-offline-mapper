@@ -180,6 +180,22 @@ def _load_rgb_image(path: str, mtime: float) -> np.ndarray:
         return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
 
 
+def _save_rgb_image(path: str | Path, image: np.ndarray) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import cv2  # type: ignore
+
+        cv2.imwrite(str(path), np.asarray(image, dtype=np.uint8)[..., ::-1])
+        return
+    except Exception:
+        pass
+
+    from PIL import Image
+
+    Image.fromarray(np.asarray(image, dtype=np.uint8)).save(path)
+
+
 def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
     alignment_texture = st.session_state.get("alignment_ground_texture_preview")
     if alignment_texture:
@@ -239,8 +255,11 @@ def _render_metric_aligned_map(
     y_span = max(y_max - y_min, float(metadata.resolution))
     width = max(1, int(np.ceil(x_span * ppm)))
     height = max(1, int(np.ceil(y_span * ppm)))
-    if width * height > 40_000_000:
-        raise ValueError(f"Metric view would be too large: {width} x {height} pixels")
+    if width * height > 8_000_000:
+        raise ValueError(
+            f"Metric view would be too large: {width} x {height} pixels. "
+            "Crop the ROI or use tighter alignment bounds before rendering at 1000 px/m."
+        )
 
     xs = x_min + (width - 1 - np.arange(width, dtype=np.float32) + 0.5) / float(ppm)
     ys = y_min + (height - 1 - np.arange(height, dtype=np.float32) + 0.5) / float(ppm)
@@ -993,28 +1012,59 @@ with tabs[5]:
         st.warning(f"Missing metric map source files: {missing}. Run Alignment IPM, BEV preview, or full export first.")
     else:
         try:
-            bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
             metadata = _metadata_from_map_yaml(metadata_path)
-            metric_rgb = _render_metric_aligned_map(
-                bev_rgb,
-                metadata,
-                pixels_per_meter=1000,
-                unknown_rgb=tuple(config["bev"].get("unknown_rgb", [80, 80, 80])),
-                draw_axes=draw_metric_axes,
-            )
+            expected_width = max(1, int(np.ceil(max(float(metadata.x_max) - float(metadata.x_min), float(metadata.resolution)) * 1000)))
+            expected_height = max(1, int(np.ceil(max(float(metadata.y_max) - float(metadata.y_min), float(metadata.resolution)) * 1000)))
+            metric_output_path = Path(config["export"].get("output_dir", "outputs/track_map")) / "metric_aligned_map_1000pxpm.png"
             st.write(
                 {
                     "pixels_per_meter": 1000,
-                    "metric_image_size": [int(metric_rgb.shape[1]), int(metric_rgb.shape[0])],
-                    "origin_pixel": [int(metric_rgb.shape[1] - 1), int(metric_rgb.shape[0] - 1)],
+                    "metric_image_size": [int(expected_width), int(expected_height)],
+                    "origin_pixel": [int(expected_width - 1), int(expected_height - 1)],
                     "lower_right_world_xy": [float(metadata.x_min), float(metadata.y_min)],
                     "upper_left_world_xy": [float(metadata.x_max), float(metadata.y_max)],
                     "x_axis": "+x is horizontal left",
                     "y_axis": "+y is vertical up",
                     "source": {"bev_rgb": str(bev_path), "metadata": str(metadata_path)},
+                    "rendered_png": str(metric_output_path),
                 }
             )
-            st.image(metric_rgb, caption="Metric aligned map view", use_container_width=False)
+            if st.button("Render metric aligned map", key="render_metric_aligned_map"):
+                bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+                metric_rgb = _render_metric_aligned_map(
+                    bev_rgb,
+                    metadata,
+                    pixels_per_meter=1000,
+                    unknown_rgb=tuple(config["bev"].get("unknown_rgb", [80, 80, 80])),
+                    draw_axes=draw_metric_axes,
+                )
+                _save_rgb_image(metric_output_path, metric_rgb)
+                st.session_state.bev_metric_render = {
+                    "path": str(metric_output_path),
+                    "bev_path": str(bev_path),
+                    "bev_mtime": float(bev_path.stat().st_mtime),
+                    "metadata_path": str(metadata_path),
+                    "metadata_mtime": float(metadata_path.stat().st_mtime),
+                    "draw_axes": bool(draw_metric_axes),
+                }
+                st.success(f"Rendered metric map: {metric_output_path}")
+
+            render_info = st.session_state.get("bev_metric_render")
+            if render_info and Path(render_info.get("path", "")).exists():
+                stale = (
+                    render_info.get("bev_path") != str(bev_path)
+                    or render_info.get("metadata_path") != str(metadata_path)
+                    or float(render_info.get("bev_mtime", -1.0)) != float(bev_path.stat().st_mtime)
+                    or float(render_info.get("metadata_mtime", -1.0)) != float(metadata_path.stat().st_mtime)
+                    or bool(render_info.get("draw_axes", True)) != bool(draw_metric_axes)
+                )
+                if stale:
+                    st.warning("The displayed metric map was rendered from older inputs. Press Render metric aligned map to refresh it.")
+                st.image(render_info["path"], caption="Metric aligned map view", use_container_width=False)
+            elif metric_output_path.exists():
+                st.image(str(metric_output_path), caption="Metric aligned map view", use_container_width=False)
+            else:
+                st.info("Press Render metric aligned map to generate the fixed-scale view.")
         except Exception as exc:
             st.error(str(exc))
 
