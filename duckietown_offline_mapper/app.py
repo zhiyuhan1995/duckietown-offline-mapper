@@ -31,6 +31,79 @@ def _load_default_config() -> dict:
     return load_yaml(Path(__file__).resolve().parent / "configs" / "default.yaml")
 
 
+def _pipeline_input_key(config: dict) -> tuple[str, int, int]:
+    input_config = config.get("input", {})
+    return (
+        str(input_config.get("path", "")),
+        int(input_config.get("keyframe_interval", 0) or 0),
+        int(input_config.get("max_keyframes", 0) or 0),
+    )
+
+
+def _control_points_xy_equal(a: list[dict], b: list[dict], tolerance: float = 1e-6) -> bool:
+    if len(a) != len(b):
+        return False
+    for point_a, point_b in zip(a, b):
+        for key in ("source", "target"):
+            values_a = point_a.get(key, [])
+            values_b = point_b.get(key, [])
+            if len(values_a) < 2 or len(values_b) < 2:
+                return False
+            if not np.allclose(
+                np.asarray(values_a[:2], dtype=np.float64),
+                np.asarray(values_b[:2], dtype=np.float64),
+                atol=float(tolerance),
+                rtol=0.0,
+            ):
+                return False
+    return True
+
+
+def _alignment_preview_override_for_config(config: dict) -> tuple[dict | None, dict | None]:
+    output_dir = Path(config.get("export", {}).get("output_dir", "outputs/track_map"))
+    preview_path = output_dir / "alignment_preview_run_summary.yaml"
+    if not preview_path.exists():
+        return None, None
+    try:
+        preview_summary = load_yaml(preview_path)
+    except Exception:
+        return None, None
+    preview_config = preview_summary.get("config", {})
+    if _pipeline_input_key(preview_config) != _pipeline_input_key(config):
+        return None, None
+    preview_alignment = dict(preview_config.get("alignment", {}))
+    control_points = preview_alignment.get("control_points", [])
+    if len(control_points) < 3:
+        return None, None
+    preview_transform = (
+        preview_summary.get("result", {})
+        .get("project_metadata", {})
+        .get("reconstruction_to_map_transform", {})
+    )
+    if "allow_reflection" not in preview_alignment and "allow_reflection" in preview_transform:
+        preview_alignment["allow_reflection"] = bool(preview_transform["allow_reflection"])
+    return {"alignment": preview_alignment}, {
+        "path": str(preview_path),
+        "mode": preview_transform.get("mode"),
+        "determinant": preview_transform.get("determinant"),
+        "reflection": preview_transform.get("reflection"),
+        "rms_error": preview_transform.get("rms_error"),
+        "control_points": control_points,
+    }
+
+
+def _config_with_alignment_preview_override(config: dict, force: bool = True) -> tuple[dict, dict | None]:
+    override, source = _alignment_preview_override_for_config(config)
+    if override is None:
+        return config, None
+    if not force:
+        current_points = config.get("alignment", {}).get("control_points", [])
+        preview_points = override.get("alignment", {}).get("control_points", [])
+        if len(current_points) >= 3 and not _control_points_xy_equal(current_points, preview_points):
+            return config, None
+    return deep_update(config, override), source
+
+
 def _config_from_last_run(default_config: dict) -> tuple[dict, str | None]:
     output_dir = Path(default_config.get("export", {}).get("output_dir", "outputs/track_map"))
     run_summary_path = output_dir / "run_summary.yaml"
@@ -40,7 +113,9 @@ def _config_from_last_run(default_config: dict) -> tuple[dict, str | None]:
         summary = load_yaml(run_summary_path)
         saved_config = summary.get("config")
         if isinstance(saved_config, dict):
-            return deep_update(default_config, saved_config), str(run_summary_path)
+            loaded_config = deep_update(default_config, saved_config)
+            loaded_config, _ = _config_with_alignment_preview_override(loaded_config)
+            return loaded_config, str(run_summary_path)
     except Exception:
         return default_config, None
     return default_config, None
@@ -123,11 +198,14 @@ def _pipeline_subprocess_env() -> dict[str, str]:
 
 def _run_pipeline_subprocess(config: dict) -> dict:
     project_root = Path(__file__).resolve().parents[1]
-    output_dir = project_root / str(config["export"]["output_dir"])
+    runtime_config, alignment_override_source = _config_with_alignment_preview_override(config, force=False)
+    output_dir = project_root / str(runtime_config["export"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     runtime_config_path = output_dir / "streamlit_runtime_config.yaml"
     with runtime_config_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(config, f, sort_keys=False)
+        yaml.safe_dump(runtime_config, f, sort_keys=False)
+    if alignment_override_source:
+        save_yaml(alignment_override_source, output_dir / "streamlit_alignment_source.yaml")
 
     command = [
         sys.executable,
@@ -1210,6 +1288,9 @@ def _control_points_from_run_summary(run_summary_path: str | Path) -> list[dict]
 
 
 def _default_alignment_control_points(config: dict) -> tuple[list[dict], str]:
+    preview_override, preview_source = _alignment_preview_override_for_config(config)
+    if preview_override and preview_source:
+        return list(preview_override["alignment"].get("control_points", [])), str(preview_source["path"])
     output_dir = config.get("export", {}).get("output_dir", "outputs/track_map")
     run_summary_path = _default_run_summary_path(output_dir)
     control_points = _control_points_from_run_summary(run_summary_path)

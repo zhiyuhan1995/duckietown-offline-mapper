@@ -1151,3 +1151,30 @@ Date: 2026-07-01
   - `python -m pytest duckietown_offline_mapper/tests -q`: `16 passed`
   - Restarted Streamlit on `cluster-gpu02` with `CUDA_VISIBLE_DEVICES=0` / `DUCKIETOWN_MAPPER_CUDA_VISIBLE_DEVICES=0`.
   - HTTP smoke check on `http://127.0.0.1:8501`: `200 OK`
+
+## Full Export Alignment Preview Sync
+
+Date: 2026-07-01
+
+- Problem:
+  - Several files in `outputs/track_map/` such as `map.png`, `map_with_margin.png`, and `semantic_mask.png` were visibly slanted even though the current Alignment/BEV preview looked aligned.
+- Troubleshooting route:
+  - `outputs/track_map/alignment_preview_run_summary.yaml` contained the intended reflected alignment:
+    - targets `(0,0)`, `(0,3.01)`, `(3.6,0)`
+    - `mode: sim2_reflection`, `determinant: -1.0`, RMS about `0.014`
+  - The freshly exported `outputs/track_map/map_metadata.yaml` instead recorded an older non-reflected alignment:
+    - targets `(0,0)`, `(2,0)`, `(0,2.4)`
+    - `mode: sim2`, `determinant: +1.0`
+  - Therefore the exported ROS map was not just displayed differently; it had been regenerated with stale control points.
+- Fix:
+  - App startup now merges a same-input `alignment_preview_run_summary.yaml` alignment block over the config loaded from the last full export.
+  - `_run_pipeline_subprocess` now does the same merge before writing `streamlit_runtime_config.yaml`, so BEV preview/full export use the active Alignment preview points.
+  - Alignment-tab default correspondences also prefer the same-input preview summary over the latest full-export summary.
+  - If the user edits correspondences in the UI so they differ from the saved preview, export keeps the edited UI values instead of silently reusing the old preview.
+  - The app writes `outputs/track_map/streamlit_alignment_source.yaml` to record which preview summary supplied the export alignment.
+  - Regenerated `outputs/track_map/` on `cluster-gpu02` with the reflected preview alignment.
+- Verification:
+  - `python -m compileall -q duckietown_offline_mapper`: passed
+  - `python -m pytest duckietown_offline_mapper/tests -q`: `16 passed`
+  - New `outputs/track_map/map_metadata.yaml` records `mode: sim2_reflection`, `determinant: -1.0`, and the intended targets `(0,0)`, `(0,3.01)`, `(3.6,0)`.
+  - New `outputs/track_map/map.png` is visually axis-aligned.
