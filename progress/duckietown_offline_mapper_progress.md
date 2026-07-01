@@ -1075,3 +1075,21 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
+
+## Alignment Estimate No Auto-IPM Regeneration
+
+Date: 2026-07-01
+
+- Problem:
+  - Pressing `Estimate planar transform` immediately triggered `Regenerating IPM ground texture for alignment preview...`, making a lightweight transform estimate block on a heavier texture render.
+- Troubleshooting route:
+  - The estimate button set `alignment_force_regenerate_ipm=True`.
+  - On the next rerun, the Ground Texture section consumed that flag and called `render_ground_texture_bev` automatically.
+  - This was too aggressive: estimation should only update the transform/summary; texture regeneration should be an explicit user action or happen when the user explicitly renders the BEV metric map.
+- Fix:
+  - Removed the automatic IPM regeneration trigger from `Estimate planar transform`.
+  - The Alignment page now discards any old `alignment_force_regenerate_ipm` flag left in a browser session.
+  - IPM regeneration remains available only through `Regenerate alignment IPM texture` or the BEV page's explicit `Render metric aligned map` flow.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`

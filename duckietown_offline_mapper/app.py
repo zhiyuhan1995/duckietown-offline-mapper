@@ -1683,13 +1683,11 @@ with tabs[3]:
                 "inpaint_radius": int(ground_texture_config.get("inpaint_radius", 3)),
                 "unknown_rgb": unknown_rgb,
             }
-            auto_regenerate = bool(st.session_state.pop("alignment_force_regenerate_ipm", False))
-            force_regenerate = st.button("Regenerate alignment IPM texture") or auto_regenerate
+            st.session_state.pop("alignment_force_regenerate_ipm", None)
+            force_regenerate = st.button("Regenerate alignment IPM texture")
             preview_state = st.session_state.get("alignment_ground_texture_preview")
 
             if force_regenerate:
-                if auto_regenerate:
-                    st.info("Alignment transform changed; regenerating IPM texture from the preview run summary.")
                 with st.spinner("Regenerating IPM ground texture for alignment preview..."):
                     texture_result = render_ground_texture_bev(
                         run_summary_path=alignment_run_summary_path,
@@ -1883,7 +1881,6 @@ with tabs[3]:
             st.session_state.alignment_preview_run_summary_path = str(preview_path)
             st.session_state.alignment_pending_run_summary_path = str(preview_path)
             st.session_state.alignment_ground_texture_preview = None
-            st.session_state.alignment_force_regenerate_ipm = True
             st.session_state.bev_metric_render = None
             st.session_state.bev_metric_default_source_signature = None
             st.rerun()
