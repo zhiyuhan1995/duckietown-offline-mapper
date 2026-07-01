@@ -1129,3 +1129,25 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
+
+## World Map Live Alignment Source Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - The Alignment and BEV metric views were aligned, but the World Map tab could show a slanted occupancy/margin image against the current x/y axes and target points.
+- Troubleshooting route:
+  - World Map was hard-wired to `outputs/track_map/map.yaml`, `map_metadata.yaml`, and `occupancy_grid.npy`.
+  - Those exported files can lag behind the current Alignment preview and current IPM texture.
+  - The page was therefore mixing an old exported occupancy image with the latest alignment target points and axes.
+- Fix:
+  - Occupancy preview now stores the computed `occupancy_grid`, preview metadata, and coordinate convention in Streamlit session state.
+  - World Map now has a source selector:
+    - `Live occupancy preview`: uses the latest Occupancy preview grid plus current alignment metadata, and recomputes the gradient margin live from the World Map margin slider.
+    - `Exported ROS map`: keeps the old ROS `map.yaml` path, but warns when the exported control points do not match the current Alignment preview.
+  - Plotly world-map rendering now supports separate x/y pixel resolutions so resized live preview images keep the correct metric bounds.
+- Verification:
+  - `python -m compileall -q duckietown_offline_mapper`: passed
+  - `python -m pytest duckietown_offline_mapper/tests -q`: `16 passed`
+  - Restarted Streamlit on `cluster-gpu02` with `CUDA_VISIBLE_DEVICES=0` / `DUCKIETOWN_MAPPER_CUDA_VISIBLE_DEVICES=0`.
+  - HTTP smoke check on `http://127.0.0.1:8501`: `200 OK`

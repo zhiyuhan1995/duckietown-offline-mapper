@@ -716,6 +716,10 @@ def _metadata_dict_from_yaml(path: str | Path) -> dict:
 
 def _metadata_from_map_yaml(path: str | Path):
     meta = _metadata_dict_from_yaml(path)
+    return _metadata_from_dict(meta)
+
+
+def _metadata_from_dict(meta: dict):
     return metadata_from_bounds(
         float(meta["x_min"]),
         float(meta["x_max"]),
@@ -1134,6 +1138,31 @@ def _load_ros_map_for_world_view(map_yaml_path: str | Path) -> dict:
     }
 
 
+def _map_info_from_world_rgb(image: np.ndarray, metadata, image_label: str, mode: str = "live") -> dict:
+    image = np.asarray(image, dtype=np.uint8)
+    if image.ndim == 2:
+        image = np.stack([image] * 3, axis=-1)
+    height, width = image.shape[:2]
+    x_min = float(metadata.x_min)
+    x_max = float(metadata.x_max)
+    y_min = float(metadata.y_min)
+    y_max = float(metadata.y_max)
+    resolution_x = (x_max - x_min) / max(float(width), 1.0)
+    resolution_y = (y_max - y_min) / max(float(height), 1.0)
+    return {
+        "map_yaml": None,
+        "image_path": image_label,
+        "image": image,
+        "resolution": float(max(resolution_x, resolution_y)),
+        "resolution_x": float(resolution_x),
+        "resolution_y": float(resolution_y),
+        "origin": [x_min, y_min, 0.0],
+        "bounds": [x_min, x_max, y_min, y_max],
+        "size": [int(width), int(height)],
+        "metadata": {"mode": mode},
+    }
+
+
 @st.cache_data(show_spinner=False)
 def _load_numpy_array(path: str, mtime: float) -> np.ndarray:
     del mtime
@@ -1147,6 +1176,9 @@ def _control_points_for_world_view(metadata_path: str | Path, config: dict) -> l
         control_points = data.get("reconstruction_to_map_transform", {}).get("control_points", [])
         if control_points:
             return control_points
+    active_control_points = _control_points_from_run_summary(_default_alignment_ipm_run_summary_path(config))
+    if active_control_points:
+        return active_control_points
     return list(config.get("alignment", {}).get("control_points", []))
 
 
@@ -1186,6 +1218,32 @@ def _default_alignment_control_points(config: dict) -> tuple[list[dict], str]:
     return list(_load_default_config()["alignment"].get("control_points", [])), "built-in defaults"
 
 
+def _active_alignment_control_points(config: dict) -> list[dict]:
+    control_points = _control_points_from_run_summary(_default_alignment_ipm_run_summary_path(config))
+    if control_points:
+        return control_points
+    return list(config.get("alignment", {}).get("control_points", []))
+
+
+def _control_points_match(a: list[dict], b: list[dict], tolerance: float = 1e-3) -> bool:
+    if len(a) != len(b):
+        return False
+    for point_a, point_b in zip(a, b):
+        for key in ("source", "target"):
+            values_a = point_a.get(key, [])
+            values_b = point_b.get(key, [])
+            if len(values_a) < 2 or len(values_b) < 2:
+                return False
+            if not np.allclose(
+                np.asarray(values_a[:2], dtype=np.float64),
+                np.asarray(values_b[:2], dtype=np.float64),
+                atol=float(tolerance),
+                rtol=0.0,
+            ):
+                return False
+    return True
+
+
 def _world_map_figure(
     map_info: dict,
     control_points: list[dict],
@@ -1198,7 +1256,8 @@ def _world_map_figure(
     import plotly.graph_objects as go
 
     image = map_info["image"]
-    resolution = float(map_info["resolution"])
+    resolution_x = float(map_info.get("resolution_x", map_info["resolution"]))
+    resolution_y = float(map_info.get("resolution_y", map_info["resolution"]))
     x_min, x_max, y_min, y_max = [float(v) for v in map_info["bounds"]]
     view_x_min = x_min - padding_m
     view_x_max = x_max + padding_m
@@ -1211,8 +1270,8 @@ def _world_map_figure(
             z=image,
             x0=x_min,
             y0=y_max,
-            dx=resolution,
-            dy=-resolution,
+            dx=resolution_x,
+            dy=-resolution_y,
             name="map.png",
             hovertemplate="x=%{x:.3f} m<br>y=%{y:.3f} m<extra>map.png</extra>",
         )
@@ -2428,6 +2487,9 @@ with tabs[7]:
                         "inflated_obstacle_rgb": inflated_obstacle_preview,
                         "final_occupancy_rgb": final_occupancy_preview,
                         "gradient_margin_rgb": margin_preview,
+                        "occupancy_grid": occupancy_grid.astype(np.int8),
+                        "preview_metadata": preview_metadata.to_dict(),
+                        "coordinate_convention": coordinate_convention,
                     }
 
         occupancy_preview = st.session_state.get("occupancy_preview")
@@ -2461,9 +2523,24 @@ with tabs[8]:
     default_map_yaml = output_dir / "map.yaml"
     default_map_metadata = output_dir / "map_metadata.yaml"
     default_occupancy_grid = output_dir / "occupancy_grid.npy"
-    map_yaml_path = st.text_input("ROS map YAML", value=str(default_map_yaml), key="world_map_yaml_path")
-    map_metadata_path = st.text_input("Map metadata", value=str(default_map_metadata), key="world_map_metadata_path")
-    occupancy_grid_path = st.text_input("Occupancy grid for margin preview", value=str(default_occupancy_grid), key="world_map_occupancy_grid_path")
+    occupancy_preview = st.session_state.get("occupancy_preview")
+    live_available = bool(occupancy_preview)
+    source_options = ["Live occupancy preview", "Exported ROS map"]
+    source_index = 0 if live_available else 1
+    world_map_source = st.radio("World map source", source_options, index=source_index, horizontal=True)
+    if world_map_source == "Exported ROS map":
+        map_yaml_path = st.text_input("ROS map YAML", value=str(default_map_yaml), key="world_map_yaml_path")
+        map_metadata_path = st.text_input("Map metadata", value=str(default_map_metadata), key="world_map_metadata_path")
+        occupancy_grid_path = st.text_input(
+            "Occupancy grid for margin preview",
+            value=str(default_occupancy_grid),
+            key="world_map_occupancy_grid_path",
+        )
+    else:
+        map_yaml_path = ""
+        map_metadata_path = ""
+        occupancy_grid_path = ""
+        st.caption("Live mode uses the last Occupancy preview grid and the current alignment metadata, so it does not depend on stale exported map files.")
 
     c1, c2, c3, c4 = st.columns(4)
     world_view_height = c1.slider("Viewer height", 520, 1100, 760, 20)
@@ -2479,7 +2556,11 @@ with tabs[8]:
         0.01,
         key="world_gradient_margin_m",
     )
-    show_margin_preview = c2.checkbox("Preview gradient margin from occupancy grid", value=True)
+    if world_map_source == "Exported ROS map":
+        show_margin_preview = c2.checkbox("Preview gradient margin from occupancy grid", value=True)
+    else:
+        show_margin_preview = False
+        c2.caption("Live mode always renders the margin from the current live occupancy grid.")
     config["occupancy"]["remove_isolated_occupied"] = st.checkbox(
         "Remove isolated occupied cells before margin",
         value=bool(config["occupancy"].get("remove_isolated_occupied", True)),
@@ -2488,49 +2569,125 @@ with tabs[8]:
     )
     show_world_control = st.checkbox("Show alignment target control points", value=True)
 
-    map_yaml = Path(map_yaml_path)
-    if not map_yaml.exists():
-        st.warning(f"Map YAML not found: {map_yaml_path}. Run full export first.")
-    else:
-        try:
-            map_info = _load_ros_map_for_world_view(map_yaml)
-            margin_preview_stats = None
-            occupancy_grid_path_obj = Path(occupancy_grid_path)
-            if show_margin_preview:
-                if occupancy_grid_path_obj.exists():
-                    occupancy_grid = _load_numpy_array(str(occupancy_grid_path_obj), occupancy_grid_path_obj.stat().st_mtime)
-                    expected_shape = (int(map_info["size"][1]), int(map_info["size"][0]))
-                    if occupancy_grid.shape[:2] == expected_shape:
-                        isolated_removed_cells = 0
-                        if bool(config["occupancy"].get("remove_isolated_occupied", True)):
-                            occupancy_grid, isolated_removed_cells = remove_isolated_occupied_cells(occupancy_grid)
-                        margin_layer = gradient_margin_from_occupancy(
-                            occupancy_grid,
-                            float(config["occupancy"].get("gradient_margin_m", 0.15)),
-                            float(map_info["resolution"]),
-                        )
-                        map_info = dict(map_info)
-                        map_info["image"] = np.stack(
-                            [ros_image_from_occupancy_margin(occupancy_grid, margin_layer)] * 3,
-                            axis=-1,
-                        )
-                        map_info["image_path"] = f"{occupancy_grid_path_obj} + gradient margin preview"
-                        margin_preview_stats = {
-                            "margin_radius_m": float(config["occupancy"].get("gradient_margin_m", 0.15)),
-                            "remove_isolated_occupied": bool(config["occupancy"].get("remove_isolated_occupied", True)),
-                            "isolated_occupied_removed_cells": int(isolated_removed_cells),
-                            "margin_nonzero_cells": int(np.count_nonzero(margin_layer > 0.0)),
-                            "margin_max": float(np.max(margin_layer)) if margin_layer.size else 0.0,
-                            "value_convention": "1 at occupied cells, linearly falling to 0 at margin radius",
-                        }
-                    else:
-                        st.warning(
-                            "Occupancy grid shape does not match map image size: "
-                            f"grid={occupancy_grid.shape[:2]}, map={expected_shape}."
-                        )
+    try:
+        map_info = None
+        control_points = _active_alignment_control_points(config)
+        margin_preview_stats = None
+        stale_export = False
+        if world_map_source == "Live occupancy preview":
+            if not live_available:
+                st.warning("No live occupancy preview is available. Run Occupancy preview first, or switch to Exported ROS map.")
+            else:
+                signature = occupancy_preview.get("signature", {})
+                stats = occupancy_preview.get("stats", {})
+                metadata_dict = occupancy_preview.get("preview_metadata")
+                if not metadata_dict:
+                    metadata_path = signature.get("metadata") or stats.get("source", {}).get("map_metadata")
+                    metadata_dict = _metadata_dict_from_yaml(metadata_path) if metadata_path else None
+                if not metadata_dict:
+                    raise ValueError("Live occupancy preview does not carry map metadata. Re-run Occupancy preview once.")
+                metadata = _metadata_from_dict(metadata_dict)
+                occupancy_grid = occupancy_preview.get("occupancy_grid")
+                if occupancy_grid is not None:
+                    occupancy_grid = np.asarray(occupancy_grid, dtype=np.int8)
+                    isolated_removed_cells = 0
+                    if bool(config["occupancy"].get("remove_isolated_occupied", True)):
+                        occupancy_grid, isolated_removed_cells = remove_isolated_occupied_cells(occupancy_grid)
+                    margin_layer = gradient_margin_from_occupancy(
+                        occupancy_grid,
+                        float(config["occupancy"].get("gradient_margin_m", 0.15)),
+                        float(metadata.resolution),
+                    )
+                    world_image = ros_image_from_occupancy_margin(occupancy_grid, margin_layer)
+                    if world_image.shape[1] > PREVIEW_DISPLAY_WIDTH:
+                        world_image = _resize_rgb_to_width(world_image, PREVIEW_DISPLAY_WIDTH)
+                    map_info = _map_info_from_world_rgb(
+                        world_image,
+                        metadata,
+                        "live occupancy preview + gradient margin",
+                        mode="scale",
+                    )
+                    margin_preview_stats = {
+                        "source": "live occupancy preview",
+                        "margin_radius_m": float(config["occupancy"].get("gradient_margin_m", 0.15)),
+                        "remove_isolated_occupied": bool(config["occupancy"].get("remove_isolated_occupied", True)),
+                        "isolated_occupied_removed_cells": int(isolated_removed_cells),
+                        "margin_nonzero_cells": int(np.count_nonzero(margin_layer > 0.0)),
+                        "margin_max": float(np.max(margin_layer)) if margin_layer.size else 0.0,
+                        "value_convention": "1 at occupied cells, linearly falling to 0 at margin radius",
+                    }
                 else:
-                    st.warning(f"Occupancy grid not found: {occupancy_grid_path}")
-            control_points = _control_points_for_world_view(map_metadata_path, config)
+                    st.warning("This preview was computed before live-grid storage existed; re-run Occupancy preview for adjustable margin.")
+                    world_image = occupancy_preview.get("gradient_margin_rgb")
+                    if world_image is None:
+                        world_image = occupancy_preview.get("final_occupancy_rgb")
+                    if world_image is None:
+                        raise ValueError("Live occupancy preview has no image to display.")
+                    map_info = _map_info_from_world_rgb(
+                        world_image,
+                        metadata,
+                        "live occupancy preview image",
+                        mode="scale",
+                    )
+                st.write(
+                    {
+                        "live_preview_source": stats.get("source", {}),
+                        "computed_image_size": stats.get("computed_image_size"),
+                        "coordinate_convention": occupancy_preview.get("coordinate_convention", stats.get("source", {}).get("coordinate_convention")),
+                    }
+                )
+        else:
+            map_yaml = Path(map_yaml_path)
+            if not map_yaml.exists():
+                st.warning(f"Map YAML not found: {map_yaml_path}. Run full export first.")
+            else:
+                map_info = _load_ros_map_for_world_view(map_yaml)
+                exported_control_points = _control_points_for_world_view(map_metadata_path, config)
+                active_control_points = _active_alignment_control_points(config)
+                if exported_control_points and active_control_points and not _control_points_match(exported_control_points, active_control_points):
+                    stale_export = True
+                    st.warning(
+                        "The exported ROS map control points do not match the current Alignment preview. "
+                        "Switch to Live occupancy preview or re-run full export before trusting this view."
+                    )
+                control_points = exported_control_points or active_control_points
+                occupancy_grid_path_obj = Path(occupancy_grid_path)
+                if show_margin_preview:
+                    if occupancy_grid_path_obj.exists():
+                        occupancy_grid = _load_numpy_array(str(occupancy_grid_path_obj), occupancy_grid_path_obj.stat().st_mtime)
+                        expected_shape = (int(map_info["size"][1]), int(map_info["size"][0]))
+                        if occupancy_grid.shape[:2] == expected_shape:
+                            isolated_removed_cells = 0
+                            if bool(config["occupancy"].get("remove_isolated_occupied", True)):
+                                occupancy_grid, isolated_removed_cells = remove_isolated_occupied_cells(occupancy_grid)
+                            margin_layer = gradient_margin_from_occupancy(
+                                occupancy_grid,
+                                float(config["occupancy"].get("gradient_margin_m", 0.15)),
+                                float(map_info["resolution"]),
+                            )
+                            map_info = dict(map_info)
+                            map_info["image"] = np.stack(
+                                [ros_image_from_occupancy_margin(occupancy_grid, margin_layer)] * 3,
+                                axis=-1,
+                            )
+                            map_info["image_path"] = f"{occupancy_grid_path_obj} + gradient margin preview"
+                            margin_preview_stats = {
+                                "source": "exported occupancy grid",
+                                "margin_radius_m": float(config["occupancy"].get("gradient_margin_m", 0.15)),
+                                "remove_isolated_occupied": bool(config["occupancy"].get("remove_isolated_occupied", True)),
+                                "isolated_occupied_removed_cells": int(isolated_removed_cells),
+                                "margin_nonzero_cells": int(np.count_nonzero(margin_layer > 0.0)),
+                                "margin_max": float(np.max(margin_layer)) if margin_layer.size else 0.0,
+                                "value_convention": "1 at occupied cells, linearly falling to 0 at margin radius",
+                            }
+                        else:
+                            st.warning(
+                                "Occupancy grid shape does not match map image size: "
+                                f"grid={occupancy_grid.shape[:2]}, map={expected_shape}."
+                            )
+                    else:
+                        st.warning(f"Occupancy grid not found: {occupancy_grid_path}")
+        if map_info is not None:
             x_min, x_max, y_min, y_max = [float(v) for v in map_info["bounds"]]
             target_checks = []
             for i, point in enumerate(control_points):
@@ -2546,9 +2703,12 @@ with tabs[8]:
                     )
             st.write(
                 {
-                    "map_yaml": str(map_yaml),
+                    "source_mode": world_map_source,
+                    "map_yaml": map_info.get("map_yaml"),
                     "image": map_info["image_path"],
                     "resolution_m_per_pixel": float(map_info["resolution"]),
+                    "resolution_x_m_per_pixel": float(map_info.get("resolution_x", map_info["resolution"])),
+                    "resolution_y_m_per_pixel": float(map_info.get("resolution_y", map_info["resolution"])),
                     "image_size_px": map_info["size"],
                     "world_bounds_m": {
                         "x_min": x_min,
@@ -2558,6 +2718,7 @@ with tabs[8]:
                     },
                     "origin_lower_left_xy_yaw": map_info["origin"],
                     "map_yaml_mode": map_info["metadata"].get("mode", "trinary"),
+                    "export_stale_for_current_alignment": bool(stale_export),
                     "gradient_margin_preview": margin_preview_stats,
                     "display_convention": "ROS/map view: +x right, +y up",
                     "alignment_targets": target_checks,
@@ -2573,8 +2734,8 @@ with tabs[8]:
                 bool(show_world_control),
             )
             st.plotly_chart(fig, use_container_width=True)
-        except Exception as exc:
-            st.error(str(exc))
+    except Exception as exc:
+        st.error(str(exc))
 
 with tabs[9]:
     config["export"]["output_dir"] = st.text_input("Output directory", value=config["export"].get("output_dir", "outputs/track_map"))
