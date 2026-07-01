@@ -2065,8 +2065,6 @@ with tabs[5]:
                     metadata_path = Path(texture_result.paths["metadata"])
                     metadata = texture_result.metadata
                     bev_rgb = texture_result.texture
-                    st.session_state.bev_metric_rgb_path = str(bev_path)
-                    st.session_state.bev_metric_metadata_path = str(metadata_path)
                 else:
                     bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
                 metric_rgb = _render_metric_aligned_map(

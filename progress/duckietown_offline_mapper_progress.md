@@ -1112,3 +1112,20 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
+
+## BEV Metric Render Widget State Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - `Render metric aligned map` could finish regenerating the Alignment IPM texture, then fail before writing the metric PNG with `st.session_state.bev_metric_rgb_path cannot be modified after the widget ... is instantiated`.
+- Troubleshooting route:
+  - The BEV page text inputs for source image and metadata use `bev_metric_rgb_path` and `bev_metric_metadata_path`.
+  - During the same button rerun, the stale-texture branch regenerated a new texture and then tried to write those widget-backed keys after the widgets already existed.
+  - The new Alignment IPM texture had already been written, but the exception stopped the subsequent metric remap/write step.
+- Fix:
+  - Removed the late writes to the BEV source text input keys.
+  - The render path now uses local `bev_path` / `metadata_path` variables for the current run and records the rendered source in `bev_metric_render`.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
