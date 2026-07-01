@@ -11,15 +11,15 @@ import numpy as np
 import streamlit as st
 import yaml
 
-from src.alignment import estimate_sim2
+from src.alignment import estimate_sim2, sim2_to_sim3
 from src.bev import metadata_from_bounds, world_to_grid
 from src.export import ros_image_from_occupancy, ros_image_from_occupancy_margin
 from src.ground_texture import render_ground_texture_bev
-from src.io_utils import deep_update, load_yaml
+from src.io_utils import deep_update, load_yaml, save_yaml
 from src.keyframes import extract_keyframes, load_image_folder
 from src.occupancy import fuse_occupancy, gradient_margin_from_occupancy, inflate_obstacles, remove_isolated_occupied_cells
 from src.plane import fit_ground_plane
-from src.pointcloud import PointCloud, load_ply
+from src.pointcloud import PointCloud, load_ply, save_ply, transform_point_cloud
 from src.segmentation import SemanticClass, colorize_semantic, segment_bev_rgb
 
 
@@ -207,11 +207,149 @@ def _default_run_summary_path(export_dir: str) -> str:
     return str(candidates[0])
 
 
+def _default_alignment_ipm_run_summary_path(config: dict) -> str:
+    output_dir = Path(config.get("export", {}).get("output_dir", "outputs/track_map"))
+    base = Path(_default_run_summary_path(str(output_dir)))
+    preview = output_dir / "alignment_preview_run_summary.yaml"
+    if preview.exists() and (not base.exists() or preview.stat().st_mtime >= base.stat().st_mtime):
+        return str(preview)
+    return str(base)
+
+
 def _default_alignment_ground_texture_output_dir(run_summary_path: str) -> str:
     path = Path(run_summary_path)
-    if path.name == "run_summary.yaml":
-        return str(path.parent / "alignment_ground_texture")
-    return "outputs/alignment_ground_texture"
+    return str(path.parent / "alignment_ground_texture")
+
+
+def _to_builtin(value):
+    if isinstance(value, np.ndarray):
+        return [_to_builtin(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _to_builtin(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_builtin(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _normalized_control_points(control_points: list[dict]) -> list[dict]:
+    normalized = []
+    for point in control_points:
+        source = point.get("source", [])
+        target = point.get("target", [])
+        if len(source) >= 2 and len(target) >= 2:
+            normalized.append(
+                {
+                    "source": [float(source[0]), float(source[1]), 0.0],
+                    "target": [float(target[0]), float(target[1]), 0.0],
+                }
+            )
+    return normalized
+
+
+def _estimate_alignment_from_control_points(control_points: list[dict], config: dict):
+    normalized = _normalized_control_points(control_points)
+    source = np.asarray([point["source"][:2] for point in normalized], dtype=np.float64)
+    target = np.asarray([point["target"][:2] for point in normalized], dtype=np.float64)
+    alignment_config = config.get("alignment", {})
+    estimate_scale = alignment_config.get("mode", "sim2") != "se2"
+    allow_reflection = bool(alignment_config.get("allow_reflection", True))
+    result = estimate_sim2(source, target, estimate_scale=estimate_scale, allow_reflection=allow_reflection)
+    return result, normalized, estimate_scale, allow_reflection
+
+
+def _alignment_metadata_from_result(result, control_points: list[dict], estimate_scale: bool, allow_reflection: bool) -> dict:
+    mode = "sim2_reflection" if allow_reflection and result.reflection else ("sim2" if estimate_scale else "se2")
+    return {
+        "mode": mode,
+        "allow_reflection": bool(allow_reflection),
+        "control_points": control_points,
+        "scale": float(result.scale),
+        "rotation": result.rotation.tolist(),
+        "determinant": float(result.determinant),
+        "reflection": bool(result.reflection),
+        "translation": result.translation.tolist(),
+        "rms_error": float(result.rms_error),
+        "residuals": result.residuals.tolist(),
+        "transform": sim2_to_sim3(result).tolist(),
+    }
+
+
+def _metadata_for_aligned_cloud(cloud: PointCloud, config: dict, frame_id: str):
+    roi = config.get("roi", {})
+    points = cloud.points
+    if bool(roi.get("auto", False)):
+        padding = float(roi.get("padding", 0.15))
+        q_low = float(roi.get("percentile_low", 1.0))
+        q_high = float(roi.get("percentile_high", 99.0))
+        x_min, x_max = np.percentile(points[:, 0], [q_low, q_high])
+        y_min, y_max = np.percentile(points[:, 1], [q_low, q_high])
+        x_min, x_max = float(x_min - padding), float(x_max + padding)
+        y_min, y_max = float(y_min - padding), float(y_max + padding)
+    else:
+        x_min = float(roi.get("x_min", np.min(points[:, 0])))
+        x_max = float(roi.get("x_max", np.max(points[:, 0])))
+        y_min = float(roi.get("y_min", np.min(points[:, 1])))
+        y_max = float(roi.get("y_max", np.max(points[:, 1])))
+    resolution = float(config.get("bev", {}).get("resolution", 0.005))
+    return metadata_from_bounds(x_min, x_max, y_min, y_max, resolution, frame_id)
+
+
+def _write_alignment_preview_run_summary(base_run_summary_path: str | Path, control_points: list[dict], config: dict) -> tuple[Path, dict]:
+    base_path = Path(base_run_summary_path)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Run summary not found: {base_path}")
+    output_dir = base_path.parent
+    summary = load_yaml(base_path)
+    result, normalized_points, estimate_scale, allow_reflection = _estimate_alignment_from_control_points(control_points, config)
+    alignment_metadata = _alignment_metadata_from_result(result, normalized_points, estimate_scale, allow_reflection)
+    transform = np.asarray(alignment_metadata["transform"], dtype=np.float64)
+
+    preview_aligned_cloud_path = output_dir / "alignment_preview_aligned_point_cloud.ply"
+    ground_aligned_cloud_path = output_dir / "ground_aligned_point_cloud.ply"
+    base_metadata = summary.get("result", {}).get("metadata", {})
+    frame_id = str(config.get("export", {}).get("map_frame", base_metadata.get("frame_id", "map")))
+    if ground_aligned_cloud_path.exists():
+        ground_aligned_cloud = load_ply(ground_aligned_cloud_path)
+        aligned_cloud = transform_point_cloud(ground_aligned_cloud, transform)
+        save_ply(aligned_cloud, preview_aligned_cloud_path)
+        metadata = _metadata_for_aligned_cloud(aligned_cloud, config, frame_id)
+    elif base_metadata:
+        metadata = metadata_from_bounds(
+            float(base_metadata["x_min"]),
+            float(base_metadata["x_max"]),
+            float(base_metadata["y_min"]),
+            float(base_metadata["y_max"]),
+            float(config.get("bev", {}).get("resolution", base_metadata.get("resolution", 0.005))),
+            frame_id,
+        )
+    else:
+        raise FileNotFoundError(f"Ground-aligned point cloud not found: {ground_aligned_cloud_path}")
+
+    preview_summary = _to_builtin(summary)
+    preview_config = deep_update(preview_summary.get("config", {}), config)
+    preview_config.setdefault("alignment", {})
+    preview_config["alignment"]["control_points"] = normalized_points
+    preview_config["alignment"]["allow_reflection"] = bool(allow_reflection)
+    preview_summary["config"] = preview_config
+    preview_summary.setdefault("result", {})
+    preview_summary["result"]["metadata"] = metadata.to_dict()
+    preview_summary["result"].setdefault("project_metadata", {})
+    preview_summary["result"]["project_metadata"]["reconstruction_to_map_transform"] = alignment_metadata
+    preview_summary["result"]["project_metadata"]["alignment_preview"] = {
+        "base_run_summary": str(base_path),
+        "created_at_unix": float(time.time()),
+    }
+    preview_summary["result"].setdefault("paths", {})
+    if preview_aligned_cloud_path.exists():
+        preview_summary["result"]["paths"]["aligned_point_cloud"] = str(preview_aligned_cloud_path)
+
+    preview_path = output_dir / "alignment_preview_run_summary.yaml"
+    save_yaml(preview_summary, preview_path)
+    return preview_path, alignment_metadata
 
 
 def _resize_rgb_to_width(image: np.ndarray, width: int) -> np.ndarray:
@@ -267,6 +405,10 @@ def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
         if path and Path(path).exists():
             return str(path)
     output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
+    alignment_ground_texture = output_dir / "alignment_ground_texture" / "ground_texture_bev.png"
+    alignment_ground_texture_metadata = output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml"
+    if alignment_ground_texture.exists() and alignment_ground_texture_metadata.exists():
+        return str(alignment_ground_texture)
     ground_texture = output_dir / "ground_texture" / "ground_texture_bev.png"
     if ground_texture.exists():
         return str(ground_texture)
@@ -438,6 +580,12 @@ def _latest_output_path(config: dict, last_run: dict | None, key: str, filename:
             path = alignment_texture.get("paths", {}).get("metadata")
             if path and Path(path).exists():
                 return str(path)
+    if key == "aligned_point_cloud":
+        output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
+        preview_cloud = output_dir / "alignment_preview_aligned_point_cloud.ply"
+        preview_summary = output_dir / "alignment_preview_run_summary.yaml"
+        if preview_cloud.exists() and preview_summary.exists() and preview_cloud.stat().st_mtime >= preview_summary.stat().st_mtime - 1.0:
+            return str(preview_cloud)
     if last_run:
         path = last_run.get("paths", {}).get(key)
         if path:
@@ -1312,6 +1460,12 @@ with tabs[3]:
     st.subheader("Planar Control Points")
     if st.session_state.get("alignment_control_points_source"):
         st.caption(f"Control correspondences loaded from: {st.session_state.alignment_control_points_source}")
+    config.setdefault("alignment", {})
+    config["alignment"]["allow_reflection"] = st.checkbox(
+        "Allow reflected planar alignment",
+        value=bool(config["alignment"].get("allow_reflection", True)),
+        help="Needed when the selected map coordinate convention flips handedness, for example +x left and +y up.",
+    )
     alignment_preview_source = st.radio(
         "Alignment preview source",
         ["Point Cloud", "Ground Texture"],
@@ -1325,9 +1479,12 @@ with tabs[3]:
             "the source point is recovered by inverting the current run_summary source-to-map transform."
         )
         ground_texture_config = config.setdefault("ground_texture", {})
+        default_alignment_summary = st.session_state.get("alignment_preview_run_summary_path")
+        if not default_alignment_summary or not Path(str(default_alignment_summary)).exists():
+            default_alignment_summary = _default_alignment_ipm_run_summary_path(config)
         alignment_run_summary_path = st.text_input(
             "Run summary for IPM",
-            value=_default_run_summary_path(config["export"].get("output_dir", "outputs/track_map")),
+            value=str(default_alignment_summary),
             key="alignment_ground_texture_run_summary",
         )
         ground_texture_config["enabled"] = st.checkbox(
@@ -1422,10 +1579,13 @@ with tabs[3]:
                 "inpaint_radius": int(ground_texture_config.get("inpaint_radius", 3)),
                 "unknown_rgb": unknown_rgb,
             }
-            force_regenerate = st.button("Regenerate alignment IPM texture")
+            auto_regenerate = bool(st.session_state.pop("alignment_force_regenerate_ipm", False))
+            force_regenerate = st.button("Regenerate alignment IPM texture") or auto_regenerate
             preview_state = st.session_state.get("alignment_ground_texture_preview")
 
             if force_regenerate:
+                if auto_regenerate:
+                    st.info("Alignment transform changed; regenerating IPM texture from the preview run summary.")
                 with st.spinner("Regenerating IPM ground texture for alignment preview..."):
                     texture_result = render_ground_texture_bev(
                         run_summary_path=alignment_run_summary_path,
@@ -1600,12 +1760,42 @@ with tabs[3]:
     config["alignment"]["control_points"] = edited_points
 
     if st.button("Estimate planar transform", disabled=len(edited_points) < 3):
-        res = estimate_sim2(
-            np.array([p["source"][:2] for p in edited_points]),
-            np.array([p["target"][:2] for p in edited_points]),
-            estimate_scale=config.get("alignment", {}).get("mode", "sim2") != "se2",
-        )
-        st.write({"scale": res.scale, "rms_error": res.rms_error, "transform": res.transform.tolist()})
+        try:
+            res, normalized_points, estimate_scale, allow_reflection = _estimate_alignment_from_control_points(edited_points, config)
+            alignment_metadata = _alignment_metadata_from_result(res, normalized_points, estimate_scale, allow_reflection)
+            base_summary_path = st.session_state.get("alignment_ground_texture_run_summary") or _default_run_summary_path(
+                config["export"].get("output_dir", "outputs/track_map")
+            )
+            preview_path, alignment_metadata = _write_alignment_preview_run_summary(base_summary_path, edited_points, config)
+            st.session_state.alignment_estimate_result = {
+                "scale": alignment_metadata["scale"],
+                "rms_error": alignment_metadata["rms_error"],
+                "determinant": alignment_metadata["determinant"],
+                "reflection": alignment_metadata["reflection"],
+                "mode": alignment_metadata["mode"],
+                "transform": alignment_metadata["transform"],
+                "preview_run_summary": str(preview_path),
+            }
+            st.session_state.alignment_preview_run_summary_path = str(preview_path)
+            st.session_state.alignment_ground_texture_run_summary = str(preview_path)
+            st.session_state.alignment_ground_texture_preview = None
+            st.session_state.alignment_force_regenerate_ipm = True
+            st.session_state.bev_metric_render = None
+            st.session_state.bev_metric_default_source_signature = None
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Failed to estimate/apply planar transform: {exc}")
+
+    estimate_result = st.session_state.get("alignment_estimate_result")
+    if estimate_result:
+        st.write(estimate_result)
+        if float(estimate_result.get("rms_error", 0.0)) > 0.05:
+            st.warning(
+                "Alignment RMS is high. The selected correspondences do not fit one planar similarity/reflection transform well; "
+                "check point order, target coordinates, or whether the points belong to a non-planar/misaligned IPM source."
+            )
+        elif bool(estimate_result.get("reflection", False)):
+            st.info("This alignment uses a reflected 2D transform, which is expected for a flipped map coordinate convention.")
 
 with tabs[4]:
     roi = config["roi"]

@@ -53,14 +53,19 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     if len(control_points) >= 3:
         source = np.array([p["source"][:2] for p in control_points], dtype=np.float64)
         target = np.array([p["target"][:2] for p in control_points], dtype=np.float64)
-        estimate_scale = config.get("alignment", {}).get("mode", "sim2") != "se2"
-        sim2 = estimate_sim2(source, target, estimate_scale=estimate_scale)
+        alignment_config = config.get("alignment", {})
+        estimate_scale = alignment_config.get("mode", "sim2") != "se2"
+        allow_reflection = bool(alignment_config.get("allow_reflection", False))
+        sim2 = estimate_sim2(source, target, estimate_scale=estimate_scale, allow_reflection=allow_reflection)
         alignment_transform = sim2_to_sim3(sim2)
         alignment_metadata = {
-            "mode": "sim2" if estimate_scale else "se2",
+            "mode": "sim2_reflection" if allow_reflection and sim2.reflection else ("sim2" if estimate_scale else "se2"),
+            "allow_reflection": allow_reflection,
             "control_points": control_points,
             "scale": float(sim2.scale),
             "rotation": sim2.rotation.tolist(),
+            "determinant": float(sim2.determinant),
+            "reflection": bool(sim2.reflection),
             "translation": sim2.translation.tolist(),
             "rms_error": float(sim2.rms_error),
             "residuals": sim2.residuals.tolist(),

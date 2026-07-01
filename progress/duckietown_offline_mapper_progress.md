@@ -1016,3 +1016,25 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
+
+## Reflected Alignment Transform Application Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - A visually correct three-point Alignment selection could still produce a metric BEV that looked unaligned.
+  - The shown estimate had an RMS error near 1.88 m, even though the selected source/target points matched the intended real-world coordinates.
+- Troubleshooting route:
+  - The previous planar alignment only allowed orientation-preserving Sim(2): rotation, translation, and uniform positive scale.
+  - In 2D, a negative uniform scale is equivalent to a 180 degree rotation plus positive scale, so it does not create a mirror flip.
+  - The selected map convention can flip handedness, for example +x left and +y up, which requires a reflected similarity transform with a negative determinant.
+  - The Alignment page also only displayed the estimated transform; it did not write that transform into the run summary used by IPM/BEV rendering.
+- Fix:
+  - Added optional reflected planar alignment and enabled it by default in the config.
+  - The pipeline and UI now record determinant/reflection metadata alongside scale, rotation, translation, residuals, and RMS.
+  - Pressing `Estimate planar transform` now writes `outputs/track_map/alignment_preview_run_summary.yaml` with the current transform and updated bounds.
+  - The same step writes `outputs/track_map/alignment_preview_aligned_point_cloud.ply` so downstream occupancy can use the matching aligned point cloud.
+  - Alignment IPM automatically regenerates from the preview run summary after the transform changes, and BEV/semantic/occupancy source selection prefers the latest alignment IPM.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/alignment.py duckietown_offline_mapper/src/pipeline.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`

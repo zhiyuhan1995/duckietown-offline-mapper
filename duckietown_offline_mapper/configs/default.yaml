@@ -33,6 +33,7 @@ ground_plane:
 
 alignment:
   mode: sim2
+  allow_reflection: true
   control_points:
     - source: [0.2457071752339215, -0.3820955989939758, 0.0]
       target: [0.0, 0.0, 0.0]
