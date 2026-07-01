@@ -939,3 +939,22 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
+
+## BEV Metric Source Stale Path Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - The BEV page could show a metric aligned map generated from `outputs/track_map/ground_texture/...` even after a newer Alignment IPM Texture existed at `outputs/track_map/alignment_ground_texture/...`.
+  - Streamlit text inputs kept the old source image / metadata paths, so the page looked like alignment had regressed.
+- Troubleshooting route:
+  - The displayed source path in the BEV page was the full-export ground texture.
+  - The Alignment page had produced a newer high-resolution `alignment_ground_texture` with matching metadata.
+  - The current run summary still used the default control points; if those are not updated for a new video, world axes will still reflect that old transform.
+- Fix:
+  - Metric source discovery now considers both full-export `ground_texture` and `alignment_ground_texture`.
+  - It selects the newest valid source by metadata mtime, while still preferring the in-session Alignment preview when present.
+  - The BEV page now tracks the selected source pair signature and resets its image / metadata text inputs when the latest source changes.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`

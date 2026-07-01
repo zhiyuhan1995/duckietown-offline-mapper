@@ -281,18 +281,22 @@ def _latest_metric_render_source_paths(config: dict, last_run: dict | None) -> t
     run_summary = output_dir / "run_summary.yaml"
     paired_candidates = [
         (
-            output_dir / "ground_texture" / "ground_texture_bev.png",
-            output_dir / "ground_texture" / "ground_texture_metadata.yaml",
-        ),
-        (
             output_dir / "alignment_ground_texture" / "ground_texture_bev.png",
             output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml",
         ),
+        (
+            output_dir / "ground_texture" / "ground_texture_bev.png",
+            output_dir / "ground_texture" / "ground_texture_metadata.yaml",
+        ),
     ]
+    valid_candidates: list[tuple[float, Path, Path]] = []
     for texture_path, metadata_path in paired_candidates:
         references = [run_summary] if "alignment_ground_texture" in texture_path.parts else []
         if texture_path.exists() and metadata_path.exists() and _is_file_fresh_enough(metadata_path, references):
-            return str(texture_path), str(metadata_path)
+            valid_candidates.append((metadata_path.stat().st_mtime, texture_path, metadata_path))
+    if valid_candidates:
+        _, texture_path, metadata_path = max(valid_candidates, key=lambda item: item[0])
+        return str(texture_path), str(metadata_path)
 
     if last_run:
         path = last_run.get("paths", {}).get("bev_rgb")
@@ -303,6 +307,14 @@ def _latest_metric_render_source_paths(config: dict, last_run: dict | None) -> t
 
 def _looks_like_metric_render_output_path(path: str | Path) -> bool:
     return Path(path).name.startswith("metric_aligned_map")
+
+
+def _file_pair_signature(*paths: str | Path) -> tuple[tuple[str, float | None], ...]:
+    signature = []
+    for path_value in paths:
+        path = Path(path_value)
+        signature.append((str(path), path.stat().st_mtime if path.exists() else None))
+    return tuple(signature)
 
 
 def _is_metric_aligned_bev_path(path: str | Path, config: dict) -> bool:
@@ -1450,6 +1462,11 @@ with tabs[5]:
     st.subheader("Metric Aligned Map")
     st.caption("Fixed display convention: +x points left, +y points up, 1000 pixels = 1 m. The yellow marker is the world origin (0,0).")
     default_metric_bev_path, default_metric_metadata_path = _latest_metric_render_source_paths(config, last)
+    default_metric_signature = _file_pair_signature(default_metric_bev_path, default_metric_metadata_path)
+    if st.session_state.get("bev_metric_default_source_signature") != default_metric_signature:
+        st.session_state.bev_metric_rgb_path = default_metric_bev_path
+        st.session_state.bev_metric_metadata_path = default_metric_metadata_path
+        st.session_state.bev_metric_default_source_signature = default_metric_signature
     if _looks_like_metric_render_output_path(st.session_state.get("bev_metric_rgb_path", "")):
         st.session_state.bev_metric_rgb_path = default_metric_bev_path
     if not Path(st.session_state.get("bev_metric_rgb_path", default_metric_bev_path)).exists():
