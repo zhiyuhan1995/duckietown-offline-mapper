@@ -1055,3 +1055,23 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
+
+## Metric BEV Stale Alignment Texture Guard
+
+Date: 2026-07-01
+
+- Problem:
+  - The BEV page could display a metric map where the world axes came from the current alignment state, but the rendered texture still came from an older Alignment IPM output.
+  - This made the track appear slanted relative to the axes and origin even after a good reflected alignment estimate.
+- Troubleshooting route:
+  - `outputs/track_map/alignment_preview_run_summary.yaml` had a newer timestamp than `outputs/track_map/alignment_ground_texture/ground_texture_metadata.yaml`.
+  - The stale texture metadata still pointed to `outputs/track_map/run_summary.yaml`, not the preview summary containing the latest control-point transform.
+  - The BEV page source selection was using file existence/mtime rather than verifying the texture metadata's `run_summary_sha256` against the currently selected alignment summary.
+- Fix:
+  - Added run-summary hash validation for alignment ground textures.
+  - BEV metric rendering now refuses to display an old metric PNG when the selected Alignment IPM texture is stale.
+  - Pressing `Render metric aligned map` with a stale Alignment IPM source regenerates the IPM texture from the current preview summary before rendering the fixed-scale metric map.
+  - Semantic and occupancy previews now warn and disable preview computation when their Alignment IPM source does not match the current alignment summary.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`

@@ -407,7 +407,14 @@ def _latest_bev_rgb_path(config: dict, last_run: dict | None) -> str:
     output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
     alignment_ground_texture = output_dir / "alignment_ground_texture" / "ground_texture_bev.png"
     alignment_ground_texture_metadata = output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml"
-    if alignment_ground_texture.exists() and alignment_ground_texture_metadata.exists():
+    alignment_summary = Path(_default_alignment_ipm_run_summary_path(config))
+    if alignment_summary.name == "alignment_preview_run_summary.yaml":
+        return str(alignment_ground_texture)
+    if (
+        alignment_ground_texture.exists()
+        and alignment_ground_texture_metadata.exists()
+        and _ground_texture_matches_run_summary(alignment_ground_texture_metadata, alignment_summary)
+    ):
         return str(alignment_ground_texture)
     ground_texture = output_dir / "ground_texture" / "ground_texture_bev.png"
     if ground_texture.exists():
@@ -438,11 +445,18 @@ def _latest_metric_render_source_paths(config: dict, last_run: dict | None) -> t
 
     output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
     run_summary = output_dir / "run_summary.yaml"
+    alignment_run_summary = Path(_default_alignment_ipm_run_summary_path(config))
+    alignment_texture = output_dir / "alignment_ground_texture" / "ground_texture_bev.png"
+    alignment_metadata = output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml"
+    if alignment_run_summary.name == "alignment_preview_run_summary.yaml":
+        return str(alignment_texture), str(alignment_metadata)
+    if (
+        alignment_texture.exists()
+        and alignment_metadata.exists()
+        and _ground_texture_matches_run_summary(alignment_metadata, alignment_run_summary)
+    ):
+        return str(alignment_texture), str(alignment_metadata)
     paired_candidates = [
-        (
-            output_dir / "alignment_ground_texture" / "ground_texture_bev.png",
-            output_dir / "alignment_ground_texture" / "ground_texture_metadata.yaml",
-        ),
         (
             output_dir / "ground_texture" / "ground_texture_bev.png",
             output_dir / "ground_texture" / "ground_texture_metadata.yaml",
@@ -485,6 +499,69 @@ def _file_sha256(path: str | Path) -> str | None:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _same_existing_path(left: str | Path, right: str | Path) -> bool:
+    left_path = Path(left)
+    right_path = Path(right)
+    try:
+        if left_path.exists() and right_path.exists():
+            return left_path.resolve() == right_path.resolve()
+    except Exception:
+        pass
+    return str(left_path) == str(right_path)
+
+
+def _ground_texture_matches_run_summary(metadata_path: str | Path, run_summary_path: str | Path) -> bool:
+    metadata_path = Path(metadata_path)
+    run_summary_path = Path(run_summary_path)
+    if not metadata_path.exists() or not run_summary_path.exists():
+        return False
+    try:
+        stats = load_yaml(metadata_path)
+    except Exception:
+        return False
+    saved_run_summary = stats.get("run_summary")
+    if not saved_run_summary or not _same_existing_path(saved_run_summary, run_summary_path):
+        return False
+    current_hash = _file_sha256(run_summary_path)
+    return bool(current_hash and stats.get("run_summary_sha256") == current_hash)
+
+
+def _is_alignment_ground_texture_path(path: str | Path, config: dict) -> bool:
+    output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
+    candidate = Path(path)
+    expected = output_dir / "alignment_ground_texture" / "ground_texture_bev.png"
+    try:
+        return candidate.resolve() == expected.resolve()
+    except Exception:
+        return str(candidate) == str(expected)
+
+
+def _alignment_ground_texture_paths(config: dict) -> tuple[Path, Path, Path]:
+    run_summary_path = Path(_default_alignment_ipm_run_summary_path(config))
+    output_dir = Path(_default_alignment_ground_texture_output_dir(str(run_summary_path)))
+    return run_summary_path, output_dir / "ground_texture_bev.png", output_dir / "ground_texture_metadata.yaml"
+
+
+def _render_alignment_ground_texture_for_summary(run_summary_path: str | Path, config: dict):
+    ground_texture_config = config.setdefault("ground_texture", {})
+    unknown_rgb = tuple(int(x) for x in config["bev"].get("unknown_rgb", [80, 80, 80]))
+    output_dir = _default_alignment_ground_texture_output_dir(str(run_summary_path))
+    return render_ground_texture_bev(
+        run_summary_path=run_summary_path,
+        output_dir=output_dir,
+        resolution=float(ground_texture_config.get("alignment_preview_resolution", 0.001)),
+        fusion_mode=str(ground_texture_config.get("fusion_mode", "weighted_mean")),
+        padding=0.0,
+        confidence_scale=ground_texture_config.get("confidence_scale"),
+        min_weight=float(ground_texture_config.get("min_weight", 1e-5)),
+        view_angle_power=float(ground_texture_config.get("view_angle_power", 1.5)),
+        distance_power=float(ground_texture_config.get("distance_power", 1.0)),
+        border_margin_px=float(ground_texture_config.get("border_margin_px", 4.0)),
+        inpaint_radius=int(ground_texture_config.get("inpaint_radius", 3)),
+        unknown_rgb=unknown_rgb,
+    )
 
 
 def _numbers_close(left, right, tol: float = 1e-9) -> bool:
@@ -596,6 +673,21 @@ def _latest_output_path(config: dict, last_run: dict | None, key: str, filename:
 def _metadata_from_map_yaml(path: str | Path):
     data = load_yaml(path)
     meta = data.get("metadata", data)
+    return metadata_from_bounds(
+        float(meta["x_min"]),
+        float(meta["x_max"]),
+        float(meta["y_min"]),
+        float(meta["y_max"]),
+        float(meta["resolution"]),
+        str(meta.get("frame_id", "map")),
+    )
+
+
+def _metadata_from_run_summary(path: str | Path):
+    data = load_yaml(path)
+    meta = data.get("result", {}).get("metadata", {})
+    if not meta:
+        raise ValueError(f"Run summary does not contain BEV metadata: {path}")
     return metadata_from_bounds(
         float(meta["x_min"]),
         float(meta["x_max"]),
@@ -1863,11 +1955,27 @@ with tabs[5]:
     bev_path = Path(metric_bev_path)
     metadata_path = Path(metric_metadata_path)
     missing = [str(path) for path in [bev_path, metadata_path] if not path.exists()]
-    if missing:
+    alignment_run_summary_path, expected_alignment_texture, expected_alignment_metadata = _alignment_ground_texture_paths(config)
+    selected_alignment_texture = _is_alignment_ground_texture_path(bev_path, config)
+    alignment_texture_current = (
+        selected_alignment_texture
+        and metadata_path.exists()
+        and _ground_texture_matches_run_summary(metadata_path, alignment_run_summary_path)
+    )
+    alignment_texture_stale = selected_alignment_texture and not alignment_texture_current
+    can_regenerate_alignment_texture = selected_alignment_texture and alignment_run_summary_path.exists()
+    if missing and not can_regenerate_alignment_texture:
         st.warning(f"Missing metric map source files: {missing}. Run Alignment IPM, BEV preview, or full export first.")
     else:
         try:
-            metadata = _metadata_from_map_yaml(metadata_path)
+            if alignment_texture_stale:
+                metadata = _metadata_from_run_summary(alignment_run_summary_path)
+                st.warning(
+                    "The selected Alignment IPM texture was not rendered from the current alignment preview summary. "
+                    "Press Render metric aligned map; it will regenerate the IPM texture first, then render the metric view."
+                )
+            else:
+                metadata = _metadata_from_map_yaml(metadata_path)
             expected_width, expected_height = _metric_view_shape(metadata, METRIC_PIXELS_PER_METER)
             origin_u, origin_v = _world_to_metric_view_pixel(0.0, 0.0, metadata, METRIC_PIXELS_PER_METER)
             origin_inside = 0.0 <= origin_u < expected_width and 0.0 <= origin_v < expected_height
@@ -1890,11 +1998,37 @@ with tabs[5]:
                     "x_axis": "+x is horizontal left",
                     "y_axis": "+y is vertical up",
                     "source": {"bev_rgb": str(bev_path), "metadata": str(metadata_path)},
+                    "alignment_texture_current": bool(alignment_texture_current) if selected_alignment_texture else None,
+                    "current_alignment_run_summary": str(alignment_run_summary_path) if selected_alignment_texture else None,
                     "rendered_png": str(metric_output_path),
                 }
             )
             if st.button("Render metric aligned map", key="render_metric_aligned_map"):
-                bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
+                if alignment_texture_stale:
+                    with st.spinner("Regenerating Alignment IPM texture from the current preview transform..."):
+                        texture_result = _render_alignment_ground_texture_for_summary(alignment_run_summary_path, config)
+                    st.session_state.alignment_ground_texture_preview = {
+                        "signature": {
+                            "run_summary_path": str(alignment_run_summary_path),
+                            "run_summary_mtime": float(alignment_run_summary_path.stat().st_mtime),
+                            "run_summary_sha256": _file_sha256(alignment_run_summary_path),
+                            "output_dir": str(expected_alignment_texture.parent),
+                            "resolution": float(texture_result.stats.get("resolution", texture_result.metadata.resolution)),
+                            "fusion_mode": str(texture_result.stats.get("fusion_mode", "")),
+                        },
+                        "texture": texture_result.texture,
+                        "metadata": texture_result.metadata,
+                        "paths": texture_result.paths,
+                        "loaded_from_disk": False,
+                    }
+                    bev_path = Path(texture_result.paths["texture"])
+                    metadata_path = Path(texture_result.paths["metadata"])
+                    metadata = texture_result.metadata
+                    bev_rgb = texture_result.texture
+                    st.session_state.bev_metric_rgb_path = str(bev_path)
+                    st.session_state.bev_metric_metadata_path = str(metadata_path)
+                else:
+                    bev_rgb = _load_rgb_image(str(bev_path), bev_path.stat().st_mtime)
                 metric_rgb = _render_metric_aligned_map(
                     bev_rgb,
                     metadata,
@@ -1909,6 +2043,8 @@ with tabs[5]:
                     "bev_mtime": float(bev_path.stat().st_mtime),
                     "metadata_path": str(metadata_path),
                     "metadata_mtime": float(metadata_path.stat().st_mtime),
+                    "alignment_run_summary": str(alignment_run_summary_path) if selected_alignment_texture else None,
+                    "alignment_run_summary_sha256": _file_sha256(alignment_run_summary_path) if selected_alignment_texture else None,
                     "draw_axes": bool(draw_metric_axes),
                     "render_version": METRIC_RENDER_VERSION,
                 }
@@ -1923,13 +2059,18 @@ with tabs[5]:
                     or float(render_info.get("metadata_mtime", -1.0)) != float(metadata_path.stat().st_mtime)
                     or bool(render_info.get("draw_axes", True)) != bool(draw_metric_axes)
                     or render_info.get("render_version") != METRIC_RENDER_VERSION
+                    or bool(alignment_texture_stale)
+                    or (
+                        selected_alignment_texture
+                        and render_info.get("alignment_run_summary_sha256") != _file_sha256(alignment_run_summary_path)
+                    )
                 )
                 if stale:
                     st.warning("The displayed metric map was rendered from older inputs. Press Render metric aligned map to refresh it.")
                 else:
                     st.image(render_info["path"], caption="Metric aligned map view", use_container_width=False)
             elif metric_output_path.exists():
-                if _is_file_fresh_enough(metric_output_path, [bev_path, metadata_path]):
+                if not alignment_texture_stale and _is_file_fresh_enough(metric_output_path, [bev_path, metadata_path]):
                     st.image(str(metric_output_path), caption="Metric aligned map view", use_container_width=False)
                 else:
                     st.warning("Existing metric map PNG is older than the selected source. Press Render metric aligned map to refresh it.")
@@ -1960,8 +2101,21 @@ with tabs[6]:
     bev_rgb_path = st.text_input("BEV image for live semantic preview", value=_latest_bev_rgb_path(config, last))
     bev_path = Path(bev_rgb_path)
     semantic_signature = None
+    semantic_metadata_path = bev_path.parent / "ground_texture_metadata.yaml" if _is_alignment_ground_texture_path(bev_path, config) else None
+    semantic_alignment_summary, _, _ = _alignment_ground_texture_paths(config)
+    semantic_source_stale = bool(
+        semantic_metadata_path
+        and not _ground_texture_matches_run_summary(semantic_metadata_path, semantic_alignment_summary)
+    )
+    if semantic_source_stale:
+        st.warning(
+            "This Alignment IPM texture is stale for the current alignment preview. "
+            "Refresh it from the Alignment tab or press Render metric aligned map in the BEV tab first."
+        )
     if not bev_path.exists():
         st.warning(f"BEV image not found: {bev_rgb_path}. Run BEV preview or full export first.")
+    elif semantic_source_stale:
+        st.info("Semantic preview is disabled until the selected BEV texture matches the current alignment summary.")
     else:
         preview_config = dict(seg)
         preview_config["unknown_rgb"] = list(config["bev"].get("unknown_rgb", [80, 80, 80]))
@@ -2054,9 +2208,22 @@ with tabs[7]:
     bev_path = Path(bev_rgb_path)
     cloud_path = Path(aligned_cloud_path)
     metadata_path = Path(map_metadata_path)
+    occupancy_texture_metadata_path = bev_path.parent / "ground_texture_metadata.yaml" if _is_alignment_ground_texture_path(bev_path, config) else None
+    occupancy_alignment_summary, _, _ = _alignment_ground_texture_paths(config)
+    occupancy_source_stale = bool(
+        occupancy_texture_metadata_path
+        and not _ground_texture_matches_run_summary(occupancy_texture_metadata_path, occupancy_alignment_summary)
+    )
+    if occupancy_source_stale:
+        st.warning(
+            "This Alignment IPM texture is stale for the current alignment preview. "
+            "Refresh it from the Alignment tab or press Render metric aligned map in the BEV tab first."
+        )
     missing = [str(path) for path in [bev_path, cloud_path, metadata_path] if not path.exists()]
     if missing:
         st.warning(f"Missing live occupancy source files: {missing}. Run BEV preview or full export first.")
+    elif occupancy_source_stale:
+        st.info("Occupancy preview is disabled until the selected BEV texture matches the current alignment summary.")
     else:
         metadata = _metadata_from_map_yaml(metadata_path)
         metric_source = _is_metric_aligned_bev_path(bev_path, config)
