@@ -1093,3 +1093,22 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
+
+## Occupancy Metadata Source Reset Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - The Occupancy page could raise `KeyError: 'x_min'` while parsing `outputs/track_map/map_metadata.yaml`.
+  - The live occupancy BEV source had already switched to `alignment_ground_texture/ground_texture_bev.png`, but the metadata text field could remain stuck on an older or differently shaped metadata file.
+- Troubleshooting route:
+  - The previous metadata parser only accepted top-level `x_min/x_max/y_min/y_max/resolution` or a nested `metadata` block.
+  - Streamlit text inputs preserve their session values even when the app's default source changes, so stale metadata paths could survive across alignment/BEV updates.
+  - Alignment texture metadata already contains the correct bounds under `metadata:` and is hash-validated against the active alignment preview summary.
+- Fix:
+  - Occupancy now prefers the current alignment texture metadata when that texture matches the active alignment run summary hash.
+  - Occupancy source text fields are reset before widget creation when the default BEV/cloud/metadata source changes or the current metadata cannot be parsed.
+  - Metadata parsing now accepts nested `metadata`, `result.metadata`, full export metadata, and ROS map yaml files with `image/resolution/origin`.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`

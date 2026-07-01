@@ -657,6 +657,9 @@ def _latest_output_path(config: dict, last_run: dict | None, key: str, filename:
             path = alignment_texture.get("paths", {}).get("metadata")
             if path and Path(path).exists():
                 return str(path)
+        alignment_summary, _, alignment_metadata = _alignment_ground_texture_paths(config)
+        if alignment_metadata.exists() and _ground_texture_matches_run_summary(alignment_metadata, alignment_summary):
+            return str(alignment_metadata)
     if key == "aligned_point_cloud":
         output_dir = Path(config["export"].get("output_dir", "outputs/track_map"))
         preview_cloud = output_dir / "alignment_preview_aligned_point_cloud.ply"
@@ -670,9 +673,49 @@ def _latest_output_path(config: dict, last_run: dict | None, key: str, filename:
     return str(Path(config["export"].get("output_dir", "outputs/track_map")) / filename)
 
 
-def _metadata_from_map_yaml(path: str | Path):
+def _metadata_dict_from_yaml(path: str | Path) -> dict:
+    path = Path(path)
     data = load_yaml(path)
-    meta = data.get("metadata", data)
+    if isinstance(data.get("metadata"), dict):
+        return data["metadata"]
+    if isinstance(data.get("result"), dict) and isinstance(data["result"].get("metadata"), dict):
+        return data["result"]["metadata"]
+    required = {"x_min", "x_max", "y_min", "y_max", "resolution"}
+    if required.issubset(data):
+        return data
+
+    ros_data = data.get("ros_map") if isinstance(data.get("ros_map"), dict) else data
+    if {"image", "resolution", "origin"}.issubset(ros_data):
+        image_path = Path(str(ros_data["image"]))
+        if not image_path.is_absolute():
+            image_path = path.parent / image_path
+        if not image_path.exists():
+            raise FileNotFoundError(f"ROS map image referenced by {path} was not found: {image_path}")
+        image = _load_rgb_image(str(image_path), image_path.stat().st_mtime)
+        height, width = image.shape[:2]
+        resolution = float(ros_data["resolution"])
+        origin = ros_data.get("origin", [0.0, 0.0, 0.0])
+        x_min = float(origin[0])
+        y_min = float(origin[1])
+        return {
+            "resolution": resolution,
+            "x_min": x_min,
+            "x_max": x_min + float(width) * resolution,
+            "y_min": y_min,
+            "y_max": y_min + float(height) * resolution,
+            "width": int(width),
+            "height": int(height),
+            "frame_id": str(data.get("map_frame_name", data.get("frame_id", "map"))),
+        }
+
+    raise ValueError(
+        f"{path} does not contain BEV bounds. Expected x_min/x_max/y_min/y_max, "
+        "a nested metadata block, result.metadata, or a ROS map yaml with image/resolution/origin."
+    )
+
+
+def _metadata_from_map_yaml(path: str | Path):
+    meta = _metadata_dict_from_yaml(path)
     return metadata_from_bounds(
         float(meta["x_min"]),
         float(meta["x_max"]),
@@ -2187,19 +2230,43 @@ with tabs[7]:
     )
     occ["unknown_as_occupied"] = st.checkbox("Unknown as occupied", value=bool(occ.get("unknown_as_occupied", False)))
     last = st.session_state.get("last_run")
+    default_occupancy_bev_path = _latest_bev_rgb_path(config, last)
+    default_occupancy_cloud_path = _latest_output_path(config, last, "aligned_point_cloud", "aligned_point_cloud.ply")
+    default_occupancy_metadata_path = _latest_output_path(config, last, "map_metadata", "map_metadata.yaml")
+    default_occupancy_signature = _file_pair_signature(
+        default_occupancy_bev_path,
+        default_occupancy_cloud_path,
+        default_occupancy_metadata_path,
+    )
+    current_occupancy_metadata_path = st.session_state.get("occupancy_map_metadata_path")
+    current_metadata_valid = False
+    if current_occupancy_metadata_path and Path(str(current_occupancy_metadata_path)).exists():
+        try:
+            _metadata_dict_from_yaml(current_occupancy_metadata_path)
+            current_metadata_valid = True
+        except Exception:
+            current_metadata_valid = False
+    if (
+        st.session_state.get("occupancy_default_source_signature") != default_occupancy_signature
+        or not current_metadata_valid
+    ):
+        st.session_state.occupancy_bev_rgb_path = str(default_occupancy_bev_path)
+        st.session_state.occupancy_aligned_cloud_path = str(default_occupancy_cloud_path)
+        st.session_state.occupancy_map_metadata_path = str(default_occupancy_metadata_path)
+        st.session_state.occupancy_default_source_signature = default_occupancy_signature
     bev_rgb_path = st.text_input(
         "BEV image for live occupancy semantic source",
-        value=_latest_bev_rgb_path(config, last),
+        value=default_occupancy_bev_path,
         key="occupancy_bev_rgb_path",
     )
     aligned_cloud_path = st.text_input(
         "Aligned point cloud for live obstacle preview",
-        value=_latest_output_path(config, last, "aligned_point_cloud", "aligned_point_cloud.ply"),
+        value=default_occupancy_cloud_path,
         key="occupancy_aligned_cloud_path",
     )
     map_metadata_path = st.text_input(
         "Map metadata for live occupancy preview",
-        value=_latest_output_path(config, last, "map_metadata", "map_metadata.yaml"),
+        value=default_occupancy_metadata_path,
         key="occupancy_map_metadata_path",
     )
     bev_path = Path(bev_rgb_path)
