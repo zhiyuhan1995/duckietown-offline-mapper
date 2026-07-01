@@ -1482,6 +1482,18 @@ with tabs[3]:
         default_alignment_summary = st.session_state.get("alignment_preview_run_summary_path")
         if not default_alignment_summary or not Path(str(default_alignment_summary)).exists():
             default_alignment_summary = _default_alignment_ipm_run_summary_path(config)
+        pending_alignment_summary = st.session_state.pop("alignment_pending_run_summary_path", None)
+        current_alignment_summary = st.session_state.get("alignment_ground_texture_run_summary")
+        if pending_alignment_summary and Path(str(pending_alignment_summary)).exists():
+            st.session_state.alignment_ground_texture_run_summary = str(pending_alignment_summary)
+            default_alignment_summary = str(pending_alignment_summary)
+        elif (
+            default_alignment_summary
+            and Path(str(default_alignment_summary)).exists()
+            and current_alignment_summary
+            and Path(str(current_alignment_summary)).name == "run_summary.yaml"
+        ):
+            st.session_state.alignment_ground_texture_run_summary = str(default_alignment_summary)
         alignment_run_summary_path = st.text_input(
             "Run summary for IPM",
             value=str(default_alignment_summary),
@@ -1777,7 +1789,7 @@ with tabs[3]:
                 "preview_run_summary": str(preview_path),
             }
             st.session_state.alignment_preview_run_summary_path = str(preview_path)
-            st.session_state.alignment_ground_texture_run_summary = str(preview_path)
+            st.session_state.alignment_pending_run_summary_path = str(preview_path)
             st.session_state.alignment_ground_texture_preview = None
             st.session_state.alignment_force_regenerate_ipm = True
             st.session_state.bev_metric_render = None

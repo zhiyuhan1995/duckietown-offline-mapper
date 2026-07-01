@@ -1038,3 +1038,20 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/alignment.py duckietown_offline_mapper/src/pipeline.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
+
+## Streamlit Alignment Summary State Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - Pressing `Estimate planar transform` could show `st.session_state.alignment_ground_texture_run_summary cannot be modified after the widget ... is instantiated`.
+- Troubleshooting route:
+  - Streamlit forbids modifying a widget-backed session key after that widget has already been created in the same rerun.
+  - The transform estimation wrote a valid preview summary, then tried to update the `alignment_ground_texture_run_summary` text input key too late in the page execution.
+- Fix:
+  - The button now stores the desired summary path in `alignment_pending_run_summary_path`.
+  - On the next rerun, the page applies that pending value before creating the text input widget.
+  - If a previous failed run already created `alignment_preview_run_summary.yaml`, the Ground Texture view can switch to it before widget creation as well.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `16 passed`
