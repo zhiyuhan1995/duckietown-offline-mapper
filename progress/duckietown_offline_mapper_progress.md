@@ -940,6 +940,27 @@ Date: 2026-07-01
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
 
+## Alignment IPM And Correspondence Reuse
+
+Date: 2026-07-01
+
+- Problem:
+  - The Alignment page regenerated the IPM texture whenever Streamlit session state was missing, even if the previous IPM output on disk was still valid.
+  - Control correspondences defaulted back to the built-in config instead of reusing the correspondences from the last successful run.
+- Troubleshooting route:
+  - The regeneration condition was `preview_state is None`, so service restarts or browser session refreshes forced a recompute.
+  - The existing `alignment_ground_texture/ground_texture_metadata.yaml` already has enough information to validate whether the cached texture matches the current run summary and core settings.
+  - Last-used control points are stored in `run_summary.yaml` under `result.project_metadata.reconstruction_to_map_transform.control_points`.
+- Fix:
+  - Added disk reuse for `alignment_ground_texture/ground_texture_bev.png`.
+  - Reuse is allowed when the cached metadata matches the selected `run_summary.yaml`, resolution, fusion mode, and saved render settings, and the metadata is not older than the run summary.
+  - New ground texture metadata now records render settings and run summary mtime for stricter future reuse checks.
+  - Alignment control correspondences now initialize from the current output directory's last `run_summary.yaml`.
+  - The reset button now reloads last saved correspondences instead of built-in defaults.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/ground_texture.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
+
 ## BEV Metric Source Stale Path Fix
 
 Date: 2026-07-01

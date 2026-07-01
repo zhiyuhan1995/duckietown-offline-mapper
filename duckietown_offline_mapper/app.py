@@ -317,6 +317,77 @@ def _file_pair_signature(*paths: str | Path) -> tuple[tuple[str, float | None], 
     return tuple(signature)
 
 
+def _numbers_close(left, right, tol: float = 1e-9) -> bool:
+    if left is None or right is None:
+        return left is right
+    try:
+        return abs(float(left) - float(right)) <= tol
+    except (TypeError, ValueError):
+        return left == right
+
+
+def _alignment_texture_disk_preview(signature: dict) -> dict | None:
+    output_dir = Path(signature["output_dir"])
+    texture_path = output_dir / "ground_texture_bev.png"
+    metadata_path = output_dir / "ground_texture_metadata.yaml"
+    if not texture_path.exists() or not metadata_path.exists():
+        return None
+
+    run_summary_path = Path(signature["run_summary_path"])
+    if run_summary_path.exists() and metadata_path.stat().st_mtime < run_summary_path.stat().st_mtime:
+        return None
+
+    stats = load_yaml(metadata_path)
+    if str(stats.get("run_summary", "")) != str(run_summary_path):
+        return None
+    if not _numbers_close(stats.get("resolution"), signature.get("resolution")):
+        return None
+    if str(stats.get("fusion_mode", "")) != str(signature.get("fusion_mode", "")):
+        return None
+
+    saved_settings = stats.get("settings")
+    if isinstance(saved_settings, dict):
+        comparable_keys = [
+            "resolution",
+            "fusion_mode",
+            "min_weight",
+            "view_angle_power",
+            "distance_power",
+            "border_margin_px",
+            "inpaint_radius",
+            "unknown_rgb",
+        ]
+        for key in comparable_keys:
+            if key == "unknown_rgb":
+                if [int(c) for c in saved_settings.get(key, [])] != [int(c) for c in signature.get(key, [])]:
+                    return None
+            elif key == "fusion_mode":
+                if str(saved_settings.get(key)) != str(signature.get(key)):
+                    return None
+            elif not _numbers_close(saved_settings.get(key), signature.get(key)):
+                return None
+        if not _numbers_close(saved_settings.get("confidence_scale"), signature.get("confidence_scale")):
+            return None
+
+    texture = _load_rgb_image(str(texture_path), texture_path.stat().st_mtime)
+    return {
+        "signature": signature,
+        "texture": texture,
+        "metadata": _metadata_from_map_yaml(metadata_path),
+        "paths": {
+            "texture": texture_path,
+            "raw_texture": output_dir / "ground_texture_bev_raw.png",
+            "observed_mask": output_dir / "ground_texture_observed_mask.png",
+            "weight_map": output_dir / "ground_texture_weight.png",
+            "observation_count": output_dir / "ground_texture_observation_count.png",
+            "weight_array": output_dir / "ground_texture_weight.npy",
+            "observation_count_array": output_dir / "ground_texture_observation_count.npy",
+            "metadata": metadata_path,
+        },
+        "loaded_from_disk": True,
+    }
+
+
 def _is_metric_aligned_bev_path(path: str | Path, config: dict) -> bool:
     candidate = Path(path)
     metric_render = st.session_state.get("bev_metric_render")
@@ -764,6 +835,42 @@ def _control_points_for_world_view(metadata_path: str | Path, config: dict) -> l
     return list(config.get("alignment", {}).get("control_points", []))
 
 
+def _control_points_from_run_summary(run_summary_path: str | Path) -> list[dict]:
+    path = Path(run_summary_path)
+    if not path.exists():
+        return []
+    data = load_yaml(path)
+    control_points = (
+        data.get("result", {})
+        .get("project_metadata", {})
+        .get("reconstruction_to_map_transform", {})
+        .get("control_points", [])
+    )
+    if not control_points:
+        return []
+    normalized = []
+    for point in control_points:
+        source = point.get("source", [])
+        target = point.get("target", [])
+        if len(source) >= 2 and len(target) >= 2:
+            normalized.append(
+                {
+                    "source": [float(source[0]), float(source[1]), 0.0],
+                    "target": [float(target[0]), float(target[1]), 0.0],
+                }
+            )
+    return normalized
+
+
+def _default_alignment_control_points(config: dict) -> tuple[list[dict], str]:
+    output_dir = config.get("export", {}).get("output_dir", "outputs/track_map")
+    run_summary_path = _default_run_summary_path(output_dir)
+    control_points = _control_points_from_run_summary(run_summary_path)
+    if control_points:
+        return control_points, str(run_summary_path)
+    return list(_load_default_config()["alignment"].get("control_points", [])), "built-in defaults"
+
+
 def _world_map_figure(
     map_info: dict,
     control_points: list[dict],
@@ -1165,9 +1272,14 @@ with tabs[3]:
         streamlit_image_coordinates = None
 
     if "alignment_control_points" not in st.session_state:
-        st.session_state.alignment_control_points = list(config["alignment"].get("control_points", []))
+        control_points, control_source = _default_alignment_control_points(config)
+        st.session_state.alignment_control_points = control_points
+        st.session_state.alignment_control_points_source = control_source
+        config["alignment"]["control_points"] = list(control_points)
 
     st.subheader("Planar Control Points")
+    if st.session_state.get("alignment_control_points_source"):
+        st.caption(f"Control correspondences loaded from: {st.session_state.alignment_control_points_source}")
     alignment_preview_source = st.radio(
         "Alignment preview source",
         ["Point Cloud", "Ground Texture"],
@@ -1278,6 +1390,12 @@ with tabs[3]:
             }
             force_regenerate = st.button("Regenerate alignment IPM texture")
             preview_state = st.session_state.get("alignment_ground_texture_preview")
+            if not force_regenerate and (preview_state is None or preview_state.get("signature") != signature):
+                disk_preview = _alignment_texture_disk_preview(signature)
+                if disk_preview is not None:
+                    st.session_state.alignment_ground_texture_preview = disk_preview
+                    preview_state = disk_preview
+
             if force_regenerate or preview_state is None or preview_state.get("signature") != signature:
                 with st.spinner("Regenerating IPM ground texture for alignment preview..."):
                     texture_result = render_ground_texture_bev(
@@ -1299,14 +1417,16 @@ with tabs[3]:
                     "texture": texture_result.texture,
                     "metadata": texture_result.metadata,
                     "paths": texture_result.paths,
+                    "loaded_from_disk": False,
                 }
                 preview_state = st.session_state.alignment_ground_texture_preview
 
             alignment_metadata = preview_state["metadata"]
             texture_rgb = preview_state["texture"]
             display_rgb = _resize_rgb_to_width(texture_rgb, int(texture_display_width))
+            source_label = "Reused cached" if preview_state.get("loaded_from_disk") else "Rendered"
             st.caption(
-                f"Regenerated IPM texture {texture_rgb.shape[1]} x {texture_rgb.shape[0]} "
+                f"{source_label} IPM texture {texture_rgb.shape[1]} x {texture_rgb.shape[0]} "
                 f"from {alignment_run_summary_path}. Output: {preview_state['paths']['texture']}"
             )
             if streamlit_image_coordinates:
@@ -1405,8 +1525,10 @@ with tabs[3]:
 
     st.subheader("Control Correspondences")
     st.caption("Source points are in the ground-aligned pre-map coordinate frame; target points are the real-world map coordinates.")
-    if st.button("Reset to default raw-source correspondences"):
-        st.session_state.alignment_control_points = list(_load_default_config()["alignment"].get("control_points", []))
+    if st.button("Reload last saved correspondences"):
+        control_points, control_source = _default_alignment_control_points(config)
+        st.session_state.alignment_control_points = list(control_points)
+        st.session_state.alignment_control_points_source = control_source
         config["alignment"]["control_points"] = list(st.session_state.alignment_control_points)
         st.session_state.alignment_pending_source = None
         st.rerun()
