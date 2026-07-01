@@ -896,3 +896,26 @@ Date: 2026-06-29
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
   - Full export on `myristica` GPU 0 finished successfully.
   - Current export stats included `isolated_occupied_removed_cells: 6`.
+
+## New Video Still Showing Old Reconstruction Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - After uploading a new video in the Input page, the Reconstruction page could still look like it was showing the old video.
+- Troubleshooting route:
+  - The latest `outputs/track_map/run_summary.yaml` on `cluster-gpu02` did point to a newly uploaded temp video and a new run, so VGGT was not simply ignoring the input.
+  - The Point Cloud Viewer default path still preferred old historical output directories such as `outputs/track_map_cluster_gpu01_edge_complete` over the current `export.output_dir`.
+  - Streamlit path text inputs can keep old widget state across reruns.
+  - The generated frame folders also kept stale files from older runs because `work/vggt_images` and `work/keyframes` were appended to rather than cleaned.
+- Fix:
+  - Uploaded videos are now stored at stable hash-based paths under `outputs/streamlit_uploads/` instead of a fresh anonymous temp path on every rerun.
+  - Input path / keyframe interval / max keyframes now form an input signature.
+  - When that signature changes, stale keyframe previews, last run state, point-cloud path widgets, alignment texture previews, semantic previews, occupancy previews, and cached point clouds are cleared.
+  - Reconstruction page now displays the current input path and sampling parameters.
+  - Point Cloud Viewer, Alignment source cloud, and run-summary defaults now prefer the current `export.output_dir` before old historical folders.
+  - VGGT image export now deletes old `frame_*.png` files before writing the new frame set.
+  - Keyframe previews now delete old `keyframe_*.jpg` files before writing the new previews.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/reconstruction.py duckietown_offline_mapper/src/keyframes.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import subprocess
 import sys
-from tempfile import NamedTemporaryFile
 import time
 
 import numpy as np
@@ -50,11 +50,49 @@ def _image_rgb_from_bgr(frame):
 def _clear_cached_app_state() -> None:
     import gc
 
-    for key in ["reconstruction", "reconstruction_cloud"]:
+    for key in [
+        "reconstruction",
+        "reconstruction_cloud",
+        "last_run",
+        "last_run_input_signature",
+        "frames",
+        "frames_input_signature",
+        "alignment_ground_texture_preview",
+        "bev_metric_render",
+        "semantic_preview",
+        "occupancy_preview",
+        "point_cloud_viewer_path",
+        "alignment_source_path",
+    ]:
         if key in st.session_state:
             del st.session_state[key]
     _load_cloud_for_viewer.clear()
     gc.collect()
+
+
+def _stored_uploaded_video_path(uploaded_file) -> str:
+    data = uploaded_file.getvalue()
+    digest = hashlib.sha256(data).hexdigest()[:16]
+    safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in uploaded_file.name)
+    upload_dir = Path("outputs") / "streamlit_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / f"{digest}_{safe_name}"
+    if not path.exists() or path.stat().st_size != len(data):
+        path.write_bytes(data)
+    return str(path)
+
+
+def _input_signature(config: dict) -> dict:
+    path = Path(str(config.get("input", {}).get("path", "")))
+    signature: dict = {
+        "path": str(path),
+        "keyframe_interval": int(config.get("input", {}).get("keyframe_interval", 0) or 0),
+        "max_keyframes": int(config.get("input", {}).get("max_keyframes", 0) or 0),
+    }
+    if path.exists():
+        stat = path.stat()
+        signature.update({"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)})
+    return signature
 
 
 def _pipeline_subprocess_env() -> dict[str, str]:
@@ -105,12 +143,13 @@ def _load_cloud_for_viewer(path: str, mtime: float | None = None) -> PointCloud:
 
 def _default_viewer_path(export_dir: str) -> str:
     candidates = [
+        Path(export_dir) / "aligned_point_cloud.ply",
+        Path(export_dir) / "work" / "vggt_point_cloud.ply",
+        Path(export_dir) / "ground_aligned_point_cloud.ply",
         Path("outputs/track_map_cluster_gpu01_edge_complete/aligned_point_cloud.ply"),
         Path("outputs/track_map_cluster_gpu01_edge_complete/work/vggt_point_cloud.ply"),
         Path("outputs/track_map_edge_complete/aligned_point_cloud.ply"),
         Path("outputs/track_map_edge_complete/work/vggt_point_cloud.ply"),
-        Path(export_dir) / "aligned_point_cloud.ply",
-        Path(export_dir) / "work" / "vggt_point_cloud.ply",
         Path("outputs/track_map_local/aligned_point_cloud.ply"),
         Path("outputs/track_map/aligned_point_cloud.ply"),
     ]
@@ -122,12 +161,12 @@ def _default_viewer_path(export_dir: str) -> str:
 
 def _default_alignment_source_path(export_dir: str) -> str:
     candidates = [
+        Path(export_dir) / "ground_aligned_point_cloud.ply",
+        Path(export_dir) / "aligned_point_cloud.ply",
         Path("outputs/track_map_cluster_gpu01_edge_complete/ground_aligned_point_cloud.ply"),
         Path("outputs/track_map_cluster_gpu01_edge_complete/aligned_point_cloud.ply"),
         Path("outputs/track_map_edge_complete/ground_aligned_point_cloud.ply"),
         Path("outputs/track_map_edge_complete/aligned_point_cloud.ply"),
-        Path(export_dir) / "ground_aligned_point_cloud.ply",
-        Path(export_dir) / "aligned_point_cloud.ply",
         Path("outputs/track_map/ground_aligned_point_cloud.ply"),
         Path("outputs/track_map/aligned_point_cloud.ply"),
     ]
@@ -140,13 +179,14 @@ def _default_alignment_source_path(export_dir: str) -> str:
 def _default_run_summary_path(export_dir: str) -> str:
     candidates = [
         Path(export_dir) / "run_summary.yaml",
-        Path("outputs/track_map") / "run_summary.yaml",
         Path("outputs/track_map_cluster_gpu01_edge_complete") / "run_summary.yaml",
         Path("outputs/track_map_edge_complete") / "run_summary.yaml",
+        Path("outputs/track_map") / "run_summary.yaml",
     ]
     existing = [path for path in candidates if path.exists()]
     if existing:
-        return str(max(existing, key=lambda path: path.stat().st_mtime))
+        current = Path(export_dir) / "run_summary.yaml"
+        return str(current if current.exists() else max(existing, key=lambda path: path.stat().st_mtime))
     return str(candidates[0])
 
 
@@ -889,12 +929,29 @@ with tabs[0]:
         "Max keyframes", min_value=1, value=int(config["input"].get("max_keyframes", 40))
     )
     if uploaded:
-        tmp = NamedTemporaryFile(delete=False, suffix=Path(uploaded.name).suffix)
-        tmp.write(uploaded.getvalue())
-        tmp.close()
-        config["input"]["path"] = tmp.name
+        config["input"]["path"] = _stored_uploaded_video_path(uploaded)
     else:
         config["input"]["path"] = folder
+
+    current_input_signature = _input_signature(config)
+    previous_input_signature = st.session_state.get("active_input_signature")
+    if previous_input_signature is None:
+        st.session_state.active_input_signature = current_input_signature
+    elif previous_input_signature != current_input_signature:
+        _clear_cached_app_state()
+        st.session_state.active_input_signature = current_input_signature
+        st.session_state.input_changed_notice = True
+
+    st.write(
+        {
+            "active_input": config["input"]["path"],
+            "keyframe_interval": int(config["input"]["keyframe_interval"]),
+            "max_keyframes": int(config["input"]["max_keyframes"]),
+        }
+    )
+    if st.session_state.get("input_changed_notice", False):
+        del st.session_state.input_changed_notice
+        st.warning("Input changed. Cleared stale keyframe previews, reconstruction state, and downstream previews.")
 
     if st.button("Preview keyframes"):
         path = Path(config["input"]["path"])
@@ -904,8 +961,11 @@ with tabs[0]:
             int(config["input"]["max_keyframes"]),
         )
         st.session_state.frames = frames
+        st.session_state.frames_input_signature = current_input_signature
     frames = st.session_state.get("frames", [])
     if frames:
+        if st.session_state.get("frames_input_signature") != current_input_signature:
+            st.warning("Displayed keyframes are stale. Press Preview keyframes to refresh them.")
         cols = st.columns(min(4, len(frames)))
         for i, frame in enumerate(frames[:8]):
             cols[i % len(cols)].image(_image_rgb_from_bgr(frame.image_bgr), caption=f"frame {frame.index}", use_container_width=True)
@@ -913,6 +973,16 @@ with tabs[0]:
 with tabs[1]:
     config["reconstruction"]["backend"] = "vggt_sfm"
     st.info("Reconstruction backend: VGGT-SfM only")
+    current_input_signature = _input_signature(config)
+    st.write(
+        {
+            "current_input": config["input"]["path"],
+            "keyframe_interval": int(config["input"]["keyframe_interval"]),
+            "max_keyframes": int(config["input"]["max_keyframes"]),
+        }
+    )
+    if st.session_state.get("last_run_input_signature") and st.session_state.get("last_run_input_signature") != current_input_signature:
+        st.warning("The last reconstruction was generated from a different input. Press Run reconstruction to rebuild.")
     vggt = config["reconstruction"].setdefault("vggt", {})
     sfm = config["reconstruction"].setdefault("sfm", {})
     c1, c2, c3 = st.columns(3)
@@ -949,10 +1019,12 @@ with tabs[1]:
         st.success("Cleared cached Streamlit point clouds and in-memory reconstruction state.")
     if st.button("Run reconstruction"):
         try:
+            run_input_signature = _input_signature(config)
             _clear_cached_app_state()
             with st.spinner("Running VGGT-SfM in an isolated subprocess..."):
                 res = _run_pipeline_subprocess(config)
             st.session_state.last_run = res
+            st.session_state.last_run_input_signature = run_input_signature
             st.success(f"Exported to {config['export']['output_dir']}")
             st.write(res.get("paths", {}))
         except Exception as exc:
@@ -974,6 +1046,7 @@ with tabs[1]:
         "PLY path",
         value=_default_viewer_path(config["export"].get("output_dir", "outputs/track_map")),
         disabled=viewer_source != "Exported PLY",
+        key="point_cloud_viewer_path",
     )
     viewer_cloud = None
     if viewer_source == "Latest reconstruction in memory":
@@ -1216,6 +1289,7 @@ with tabs[3]:
         alignment_path = st.text_input(
             "Ground-aligned source point cloud",
             value=_default_alignment_source_path(config["export"].get("output_dir", "outputs/track_map")),
+            key="alignment_source_path",
         )
         c1, c2, c3, c4 = st.columns(4)
         alignment_resolution = c1.slider("Alignment bounds resolution", 0.005, 0.050, 0.015, 0.005)

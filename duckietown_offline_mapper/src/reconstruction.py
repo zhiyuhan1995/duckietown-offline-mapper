@@ -165,6 +165,8 @@ class VGGT_SfMReconstructionBackend(ReconstructionBackend):
     def _write_vggt_images(frames: list[Keyframe], output_dir: Path) -> list[Path]:
         cv2 = _require_cv2()
         output_dir.mkdir(parents=True, exist_ok=True)
+        for old_path in output_dir.glob("frame_*.png"):
+            old_path.unlink()
         paths: list[Path] = []
         for i, frame in enumerate(frames):
             path = output_dir / f"frame_{i:04d}_{frame.index:06d}.png"

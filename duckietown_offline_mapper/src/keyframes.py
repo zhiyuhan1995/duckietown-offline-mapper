@@ -73,10 +73,11 @@ def save_keyframe_previews(frames: list[Keyframe], output_dir: str | Path, limit
     cv2 = _require_cv2()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    for old_path in output_dir.glob("keyframe_*.jpg"):
+        old_path.unlink()
     paths: list[Path] = []
     for frame in frames[:limit]:
         path = output_dir / f"keyframe_{frame.index:06d}.jpg"
         cv2.imwrite(str(path), frame.image_bgr)
         paths.append(path)
     return paths
-
