@@ -919,3 +919,23 @@ Date: 2026-07-01
 - Verification:
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/reconstruction.py duckietown_offline_mapper/src/keyframes.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
+
+## Alignment IPM Texture Click Restore
+
+Date: 2026-07-01
+
+- Problem:
+  - The Alignment page's regenerated IPM Texture could no longer be clicked to select control points.
+- Troubleshooting route:
+  - This was an intentional regression from an earlier safety change: Ground Texture was treated as visual-check-only because it is already rendered in the current map frame, while source control points must be in the ground-aligned pre-map frame.
+  - The safer behavior is to allow clicks but explicitly convert coordinates instead of pretending the map-frame click is a source point.
+- Fix:
+  - Restored `streamlit-image-coordinates` click handling for the Alignment Ground Texture preview.
+  - A texture click is first converted from display pixel to map-frame `(x, y)`.
+  - The current `run_summary.yaml` `reconstruction_to_map_transform` is inverted to recover the corresponding source `(x, y)` in the ground-aligned pre-map frame.
+  - The Add Correspondence form is staged with:
+    - source = inverse-transformed pre-map coordinate
+    - target = clicked map coordinate, editable before adding the control point
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`

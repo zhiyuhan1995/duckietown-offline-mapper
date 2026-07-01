@@ -601,6 +601,21 @@ def _bev_display_pixel_to_world(click_x: float, click_y: float, image: np.ndarra
     return float(x), float(y)
 
 
+def _map_xy_to_alignment_source_xy(run_summary_path: str | Path, map_x: float, map_y: float) -> tuple[float, float]:
+    summary = load_yaml(run_summary_path)
+    transform = np.asarray(
+        summary.get("result", {})
+        .get("project_metadata", {})
+        .get("reconstruction_to_map_transform", {})
+        .get("transform", np.eye(4)),
+        dtype=np.float64,
+    )
+    if transform.shape != (4, 4):
+        raise ValueError("run_summary.yaml has an invalid reconstruction_to_map_transform")
+    source = np.linalg.inv(transform) @ np.array([float(map_x), float(map_y), 0.0, 1.0], dtype=np.float64)
+    return float(source[0]), float(source[1])
+
+
 def _point_cloud_figure(
     cloud: PointCloud,
     max_points: int,
@@ -1150,8 +1165,8 @@ with tabs[3]:
 
     if alignment_preview_source == "Ground Texture":
         st.info(
-            "Ground Texture is already rendered in the current map frame, so use it for visual checking only. "
-            "Create source control points from the Point Cloud view, which uses the ground-aligned pre-map coordinates."
+            "Click the IPM texture to stage a correspondence. The clicked pixel is a map-frame target point; "
+            "the source point is recovered by inverting the current run_summary source-to-map transform."
         )
         ground_texture_config = config.setdefault("ground_texture", {})
         alignment_run_summary_path = st.text_input(
@@ -1282,7 +1297,25 @@ with tabs[3]:
                 f"Regenerated IPM texture {texture_rgb.shape[1]} x {texture_rgb.shape[0]} "
                 f"from {alignment_run_summary_path}. Output: {preview_state['paths']['texture']}"
             )
-            st.image(display_rgb, caption="Ground texture in the current map frame", use_container_width=False)
+            if streamlit_image_coordinates:
+                click = streamlit_image_coordinates(display_rgb, key="alignment_texture_click")
+                if click:
+                    map_x, map_y = _bev_display_pixel_to_world(float(click["x"]), float(click["y"]), display_rgb, alignment_metadata)
+                    try:
+                        source_x, source_y = _map_xy_to_alignment_source_xy(alignment_run_summary_path, map_x, map_y)
+                        st.session_state.alignment_pending_source = [float(source_x), float(source_y), 0.0]
+                        st.session_state.alignment_pending_tx = float(map_x)
+                        st.session_state.alignment_pending_ty = float(map_y)
+                        st.success(
+                            "Staged texture click: "
+                            f"source=({source_x:.4f}, {source_y:.4f}, 0), "
+                            f"target=({map_x:.4f}, {map_y:.4f}, 0)."
+                        )
+                    except Exception as exc:
+                        st.warning(f"Could not invert current alignment transform for this click: {exc}")
+            else:
+                st.image(display_rgb, caption="Ground texture in the current map frame", use_container_width=False)
+                st.warning("Install streamlit-image-coordinates to click the IPM texture directly.")
         else:
             st.warning(f"Run summary not found: {alignment_run_summary_path}")
     else:
