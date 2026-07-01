@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -148,9 +149,11 @@ def render_ground_texture_bev(
     texture = _inpaint_small_holes(raw_image, observed_mask, int(inpaint_radius))
 
     paths = _write_outputs(output_dir, texture, raw_image, observed_mask, weight_image, observation_image)
+    run_summary_sha256 = hashlib.sha256(run_summary_path.read_bytes()).hexdigest() if run_summary_path.exists() else None
     stats = {
         "run_summary": str(run_summary_path),
         "run_summary_mtime": float(run_summary_path.stat().st_mtime) if run_summary_path.exists() else None,
+        "run_summary_sha256": run_summary_sha256,
         "work_dir": str(work_dir),
         "image_count": int(len(image_paths)),
         "resolution": float(resolution),

@@ -31,8 +31,25 @@ def _load_default_config() -> dict:
     return load_yaml(Path(__file__).resolve().parent / "configs" / "default.yaml")
 
 
+def _config_from_last_run(default_config: dict) -> tuple[dict, str | None]:
+    output_dir = Path(default_config.get("export", {}).get("output_dir", "outputs/track_map"))
+    run_summary_path = output_dir / "run_summary.yaml"
+    if not run_summary_path.exists():
+        return default_config, None
+    try:
+        summary = load_yaml(run_summary_path)
+        saved_config = summary.get("config")
+        if isinstance(saved_config, dict):
+            return deep_update(default_config, saved_config), str(run_summary_path)
+    except Exception:
+        return default_config, None
+    return default_config, None
+
+
 if "config" not in st.session_state:
-    st.session_state.config = _load_default_config()
+    initial_config, initial_config_source = _config_from_last_run(_load_default_config())
+    st.session_state.config = initial_config
+    st.session_state.config_source = initial_config_source
 
 config = st.session_state.config
 
@@ -317,6 +334,17 @@ def _file_pair_signature(*paths: str | Path) -> tuple[tuple[str, float | None], 
     return tuple(signature)
 
 
+def _file_sha256(path: str | Path) -> str | None:
+    path = Path(path)
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _numbers_close(left, right, tol: float = 1e-9) -> bool:
     if left is None or right is None:
         return left is right
@@ -340,35 +368,39 @@ def _alignment_texture_disk_preview(signature: dict) -> dict | None:
     stats = load_yaml(metadata_path)
     if str(stats.get("run_summary", "")) != str(run_summary_path):
         return None
+    current_run_summary_sha256 = _file_sha256(run_summary_path)
+    if not current_run_summary_sha256 or stats.get("run_summary_sha256") != current_run_summary_sha256:
+        return None
     if not _numbers_close(stats.get("resolution"), signature.get("resolution")):
         return None
     if str(stats.get("fusion_mode", "")) != str(signature.get("fusion_mode", "")):
         return None
 
     saved_settings = stats.get("settings")
-    if isinstance(saved_settings, dict):
-        comparable_keys = [
-            "resolution",
-            "fusion_mode",
-            "min_weight",
-            "view_angle_power",
-            "distance_power",
-            "border_margin_px",
-            "inpaint_radius",
-            "unknown_rgb",
-        ]
-        for key in comparable_keys:
-            if key == "unknown_rgb":
-                if [int(c) for c in saved_settings.get(key, [])] != [int(c) for c in signature.get(key, [])]:
-                    return None
-            elif key == "fusion_mode":
-                if str(saved_settings.get(key)) != str(signature.get(key)):
-                    return None
-            elif not _numbers_close(saved_settings.get(key), signature.get(key)):
+    if not isinstance(saved_settings, dict):
+        return None
+    comparable_keys = [
+        "resolution",
+        "fusion_mode",
+        "padding",
+        "min_weight",
+        "view_angle_power",
+        "distance_power",
+        "border_margin_px",
+        "inpaint_radius",
+        "unknown_rgb",
+    ]
+    for key in comparable_keys:
+        if key == "unknown_rgb":
+            if [int(c) for c in saved_settings.get(key, [])] != [int(c) for c in signature.get(key, [])]:
                 return None
-        if not _numbers_close(saved_settings.get("confidence_scale"), signature.get("confidence_scale")):
+        elif key == "fusion_mode":
+            if str(saved_settings.get(key)) != str(signature.get(key)):
+                return None
+        elif not _numbers_close(saved_settings.get(key), signature.get(key)):
             return None
-
+    if not _numbers_close(saved_settings.get("confidence_scale"), signature.get("confidence_scale")):
+        return None
     texture = _load_rgb_image(str(texture_path), texture_path.stat().st_mtime)
     return {
         "signature": signature,
@@ -1377,9 +1409,11 @@ with tabs[3]:
             signature = {
                 "run_summary_path": str(alignment_run_summary_path),
                 "run_summary_mtime": Path(alignment_run_summary_path).stat().st_mtime,
+                "run_summary_sha256": _file_sha256(alignment_run_summary_path),
                 "output_dir": str(alignment_texture_output_dir),
                 "resolution": float(alignment_texture_resolution),
                 "fusion_mode": str(ground_texture_config.get("fusion_mode", "weighted_mean")),
+                "padding": 0.0,
                 "confidence_scale": ground_texture_config.get("confidence_scale"),
                 "min_weight": float(ground_texture_config.get("min_weight", 1e-5)),
                 "view_angle_power": float(ground_texture_config.get("view_angle_power", 1.5)),
@@ -1390,13 +1424,8 @@ with tabs[3]:
             }
             force_regenerate = st.button("Regenerate alignment IPM texture")
             preview_state = st.session_state.get("alignment_ground_texture_preview")
-            if not force_regenerate and (preview_state is None or preview_state.get("signature") != signature):
-                disk_preview = _alignment_texture_disk_preview(signature)
-                if disk_preview is not None:
-                    st.session_state.alignment_ground_texture_preview = disk_preview
-                    preview_state = disk_preview
 
-            if force_regenerate or preview_state is None or preview_state.get("signature") != signature:
+            if force_regenerate:
                 with st.spinner("Regenerating IPM ground texture for alignment preview..."):
                     texture_result = render_ground_texture_bev(
                         run_summary_path=alignment_run_summary_path,
@@ -1420,34 +1449,55 @@ with tabs[3]:
                     "loaded_from_disk": False,
                 }
                 preview_state = st.session_state.alignment_ground_texture_preview
+            elif preview_state is None or preview_state.get("signature") != signature:
+                disk_preview = _alignment_texture_disk_preview(signature)
+                if disk_preview is not None:
+                    st.session_state.alignment_ground_texture_preview = disk_preview
+                    preview_state = disk_preview
+                else:
+                    preview_state = None
 
-            alignment_metadata = preview_state["metadata"]
-            texture_rgb = preview_state["texture"]
-            display_rgb = _resize_rgb_to_width(texture_rgb, int(texture_display_width))
-            source_label = "Reused cached" if preview_state.get("loaded_from_disk") else "Rendered"
-            st.caption(
-                f"{source_label} IPM texture {texture_rgb.shape[1]} x {texture_rgb.shape[0]} "
-                f"from {alignment_run_summary_path}. Output: {preview_state['paths']['texture']}"
-            )
-            if streamlit_image_coordinates:
-                click = streamlit_image_coordinates(display_rgb, key="alignment_texture_click")
-                if click:
-                    map_x, map_y = _bev_display_pixel_to_world(float(click["x"]), float(click["y"]), display_rgb, alignment_metadata)
-                    try:
-                        source_x, source_y = _map_xy_to_alignment_source_xy(alignment_run_summary_path, map_x, map_y)
-                        st.session_state.alignment_pending_source = [float(source_x), float(source_y), 0.0]
-                        st.session_state.alignment_pending_tx = float(map_x)
-                        st.session_state.alignment_pending_ty = float(map_y)
-                        st.success(
-                            "Staged texture click: "
-                            f"source=({source_x:.4f}, {source_y:.4f}, 0), "
-                            f"target=({map_x:.4f}, {map_y:.4f}, 0)."
-                        )
-                    except Exception as exc:
-                        st.warning(f"Could not invert current alignment transform for this click: {exc}")
+            if preview_state is None:
+                st.warning(
+                    "No trusted cached IPM texture matches the selected run_summary and settings. "
+                    "Press Regenerate alignment IPM texture to create a fresh one; old un-fingerprinted IPM images are not reused."
+                )
             else:
-                st.image(display_rgb, caption="Ground texture in the current map frame", use_container_width=False)
-                st.warning("Install streamlit-image-coordinates to click the IPM texture directly.")
+                alignment_metadata = preview_state["metadata"]
+                texture_rgb = preview_state["texture"]
+                display_rgb = _resize_rgb_to_width(texture_rgb, int(texture_display_width))
+                source_label = "Reused cached" if preview_state.get("loaded_from_disk") else "Rendered"
+                st.caption(
+                    f"{source_label} IPM texture {texture_rgb.shape[1]} x {texture_rgb.shape[0]} "
+                    f"from {alignment_run_summary_path}. Output: {preview_state['paths']['texture']}"
+                )
+                if streamlit_image_coordinates:
+                    click = streamlit_image_coordinates(display_rgb, key="alignment_texture_click")
+                    if click:
+                        click_signature = (
+                            int(click["x"]),
+                            int(click["y"]),
+                            signature.get("run_summary_sha256"),
+                            float(signature["resolution"]),
+                        )
+                        if st.session_state.get("alignment_texture_last_click") != click_signature:
+                            st.session_state.alignment_texture_last_click = click_signature
+                            map_x, map_y = _bev_display_pixel_to_world(float(click["x"]), float(click["y"]), display_rgb, alignment_metadata)
+                            try:
+                                source_x, source_y = _map_xy_to_alignment_source_xy(alignment_run_summary_path, map_x, map_y)
+                                st.session_state.alignment_pending_source = [float(source_x), float(source_y), 0.0]
+                                st.session_state.alignment_pending_tx = float(map_x)
+                                st.session_state.alignment_pending_ty = float(map_y)
+                                st.success(
+                                    "Staged texture click: "
+                                    f"source=({source_x:.4f}, {source_y:.4f}, 0), "
+                                    f"target=({map_x:.4f}, {map_y:.4f}, 0)."
+                                )
+                            except Exception as exc:
+                                st.warning(f"Could not invert current alignment transform for this click: {exc}")
+                else:
+                    st.image(display_rgb, caption="Ground texture in the current map frame", use_container_width=False)
+                    st.warning("Install streamlit-image-coordinates to click the IPM texture directly.")
         else:
             st.warning(f"Run summary not found: {alignment_run_summary_path}")
     else:
@@ -1521,6 +1571,7 @@ with tabs[3]:
             {"source": [float(source[0]), float(source[1]), 0.0], "target": [float(tx), float(ty), 0.0]}
         )
         st.session_state.alignment_pending_source = None
+        st.session_state.alignment_texture_last_click = None
         st.rerun()
 
     st.subheader("Control Correspondences")
@@ -1531,6 +1582,7 @@ with tabs[3]:
         st.session_state.alignment_control_points_source = control_source
         config["alignment"]["control_points"] = list(st.session_state.alignment_control_points)
         st.session_state.alignment_pending_source = None
+        st.session_state.alignment_texture_last_click = None
         st.rerun()
     edited_points = []
     for i, point in enumerate(st.session_state.alignment_control_points):

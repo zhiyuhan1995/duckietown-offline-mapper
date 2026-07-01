@@ -961,6 +961,43 @@ Date: 2026-07-01
   - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/ground_texture.py`: passed
   - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
 
+## Alignment Click Replay Input Fix
+
+Date: 2026-07-01
+
+- Problem:
+  - After clicking the IPM texture, editing one target coordinate field could cause the other target field to jump back to the clicked coordinate.
+- Troubleshooting route:
+  - `streamlit-image-coordinates` returns the last clicked pixel again on subsequent Streamlit reruns.
+  - Editing a number input triggers a rerun, so the old click handler was restaging both target fields.
+- Fix:
+  - Added an `alignment_texture_last_click` signature.
+  - The click handler now stages source/target values only when the clicked pixel or run-summary signature changes.
+  - Adding or reloading correspondences clears the last-click signature so a deliberate new click can be processed.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/ground_texture.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
+
+## Strict IPM Cache Fingerprint
+
+Date: 2026-07-01
+
+- Problem:
+  - The Alignment page could reuse an older `alignment_ground_texture` image because the cache check only compared the `run_summary.yaml` path and loose metadata.
+  - Since `outputs/track_map/run_summary.yaml` is overwritten between runs, the same path can refer to a different reconstruction/input over time.
+- Troubleshooting route:
+  - The current `run_summary.yaml` on `cluster-gpu02` pointed to `track.mp4`, while the cached alignment texture metadata did not contain a run-summary hash or render settings.
+  - Reusing that un-fingerprinted cache could display an older IPM as if it were the last valid current result.
+- Fix:
+  - Ground texture metadata now records `run_summary_sha256`.
+  - Alignment IPM disk reuse now requires the cached metadata hash to match the current `run_summary.yaml` content hash.
+  - Old metadata without a hash or without settings is treated as untrusted and is not displayed as a cached current result.
+  - If no trusted cache exists, the page no longer auto-regenerates; it asks the user to press `Regenerate alignment IPM texture`.
+  - Streamlit startup now initializes config from the last `outputs/track_map/run_summary.yaml` when available, reducing accidental fallback to default `track.mp4` after service restarts.
+- Verification:
+  - `.conda-vggt/bin/python -m py_compile duckietown_offline_mapper/app.py duckietown_offline_mapper/src/ground_texture.py`: passed
+  - `.conda-vggt/bin/python -m pytest -q duckietown_offline_mapper/tests`: `15 passed`
+
 ## BEV Metric Source Stale Path Fix
 
 Date: 2026-07-01
